@@ -1,0 +1,9 @@
+bin/*
+!bin/.gitkeep
+logs/*
+!logs/.gitkeep
+results/*
+!results/.gitkeep
+*.o
+*.out
+
