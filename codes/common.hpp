@@ -1,5 +1,5 @@
-#ifndef OS_RESERVATION_COMMON_HPP
-#define OS_RESERVATION_COMMON_HPP
+#ifndef COMMON_HPP
+#define COMMON_HPP
 
 #include <cerrno>
 #include <climits>
