@@ -13,10 +13,6 @@
 #include <vector>
 #include <unistd.h>
 
-namespace {
-
-using namespace osproj;
-
 struct LoadOptions {
     int clients;
     int requests_per_client;
@@ -196,8 +192,6 @@ void run_logical_client(int client_number, const LoadOptions& options,
 
     close_client_queues(queues);
 }
-
-}  // namespace
 
 int main(int argc, char** argv) {
     LoadOptions options;

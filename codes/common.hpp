@@ -9,8 +9,6 @@
 #include <ctime>
 #include <string>
 
-namespace osproj {
-
 static const char REQUEST_QUEUE_NAME[] = "/osproj_requests";
 // 10 is accepted by the default Linux mqueue limit on most installations.
 static const long QUEUE_MAX_MESSAGES = 10;
@@ -135,7 +133,5 @@ inline void copy_text(char* destination, std::size_t capacity,
 inline bool valid_resource_id(int resource_id) {
     return resource_id >= 1 && resource_id <= RESOURCE_COUNT;
 }
-
-}  // namespace osproj
 
 #endif

@@ -20,10 +20,6 @@
 #include <vector>
 #include <unistd.h>
 
-namespace {
-
-using namespace osproj;
-
 std::atomic<bool> running(true);
 std::mutex log_mutex;
 std::array<std::mutex, RESOURCE_COUNT> resource_mutexes;
@@ -308,8 +304,6 @@ bool parse_bool_value(const std::string& value, bool& result) {
     }
     return false;
 }
-
-}  // namespace
 
 int main(int argc, char** argv) {
     int worker_count = 3;

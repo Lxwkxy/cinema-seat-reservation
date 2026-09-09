@@ -11,10 +11,6 @@
 #include <string>
 #include <unistd.h>
 
-namespace {
-
-using namespace osproj;
-
 bool parse_line(const std::string& line, Command& command, int& resource_id) {
     std::istringstream input(line);
     std::string token;
@@ -111,8 +107,6 @@ bool run_once(int argc, char** argv, int command_start, mqd_t request_queue,
     return send_request(request_queue, response_queue, response_queue_name,
                         client_id, command, resource_id);
 }
-
-}  // namespace
 
 int main(int argc, char** argv) {
     int client_id = static_cast<int>(getpid() % 100000);
