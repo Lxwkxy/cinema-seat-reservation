@@ -1,0 +1,9 @@
+services:
+  cpp:
+    build: .
+    container_name: osproj
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    ipc: host
+    tty: true
