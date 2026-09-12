@@ -10,7 +10,6 @@
 - codes/common.hpp: Message Struct, Commands และ Constants
 - scripts/: คำสั่งช่วยรัน Server และ Load Test
 - logs/: Server Log
-- results/: ผลการทดลอง
 
 ## ความต้องการ
 
@@ -27,15 +26,13 @@
 
 เปิด Container:
 
-    docker run --name osproj --ipc=host -it --rm \
-      -v "$PWD:/workspace" \
-      -w /workspace os-reservation
+    docker run --name osproj --ipc=host -it --rm -v "${PWD}:/workspace" -w /workspace os-reservation
 
-ถ้าใช้ PowerShell ให้ใช้ path ของโฟลเดอร์ปัจจุบันแทนค่า $PWD
+คำสั่งนี้ใช้ได้ใน PowerShell เมื่อเปิด Docker Desktop แล้ว
 
 จากนั้น Compile ภายใน Container:
 
-    mkdir -p bin logs results
+    mkdir -p bin logs
 
     g++ -std=c++11 -O2 -Wall -Wextra -pthread -Icodes \
       codes/server.cpp -lrt -o bin/server
@@ -106,52 +103,206 @@
 
 ## Load Test
 
-ใช้ Load Client:
+Load Test ใช้ `client_load` เพื่อสร้าง Logical Clients หลายตัวและส่ง Request ไปยัง Server พร้อมกัน
 
-    ./bin/client_load \
-      --clients 50 \
-      --requests 20 \
-      --command STATUS \
-      --resource 10
+ตัวอย่างการทดสอบด้วย Load Client:
 
-หรือใช้ Script:
+    ./bin/client_load --clients 50 --requests 20 --command STATUS --resource 10
+
+หรือใช้ Script ซึ่งจะแสดงผลการทดสอบบนหน้าจอ:
 
     bash scripts/load_test.sh
 
-Script จะเริ่มที่ 5 Logical Clients และเพิ่มทีละ 5 จนกว่า Client จะพบ Failure/Timeout
-จากนั้นบันทึกผลไว้ใน results/ โดยไม่ต้อง Compile ใหม่เมื่อแก้เฉพาะ Script
+Script จะเริ่มที่ 5 Logical Clients และเพิ่มทีละ 5 จนกว่า Client จะพบ Failure หรือ Timeout
 
 สามารถกำหนดขอบเขตการทดสอบได้ด้วย Environment Variable:
 
     MAX_CLIENTS=1000 STEP=5 REQUESTS_PER_CLIENT=20 bash scripts/load_test.sh
 
-ค่าเริ่มต้นของ MAX_CLIENTS เป็น 0 หมายถึงทดสอบต่อไปจนกว่าจะเกิด Failure/Timeout
+ความหมายของตัวแปร:
+
+- `MAX_CLIENTS`: จำนวน Client สูงสุดที่ต้องการทดสอบ
+- `STEP`: จำนวน Client ที่เพิ่มขึ้นในแต่ละรอบ
+- `REQUESTS_PER_CLIENT`: จำนวน Request ที่แต่ละ Client ส่ง
+
+ค่าเริ่มต้นของ `MAX_CLIENTS` เป็น `0` หมายถึงทดสอบต่อไปจนกว่าจะเกิด Failure หรือ Timeout
 
 Metrics ที่แสดง:
 
 - Total Requests
-- Success/Failure
-- Timeout
+- Success
+- Failure หรือ Timeout
 - Elapsed Time
 - Throughput
 - Average Latency
 
-การเพิ่ม Client จนระบบเริ่ม Timeout หรือ Queue เต็มถือเป็น Stress/Capacity Test ควรบันทึกจุดอิ่มตัวและสาเหตุที่เกิดขึ้น
+การเพิ่ม Client จนระบบเริ่ม Timeout หรือ Queue เต็มถือเป็น Stress หรือ Capacity Test
+
+## Demo Workflow
+
+การทดลองทั้งหมดควรทำภายใน Docker Container เพื่อให้ใช้ C++11, POSIX Message Queue และ Linux Environment เดียวกัน
+
+### เตรียมระบบก่อนเริ่ม Demo
+
+ทำคำสั่งต่อไปนี้บน PowerShell ที่โฟลเดอร์หลักของโปรเจกต์:
+
+    docker compose up -d
+
+    docker exec -it osproj bash
+
+ภายใน Container ให้ Compile โปรแกรม:
+
+    mkdir -p bin logs
+
+    g++ -std=c++11 -O2 -Wall -Wextra -pthread -Icodes codes/server.cpp -lrt -o bin/server
+
+    g++ -std=c++11 -O2 -Wall -Wextra -pthread -Icodes codes/client.cpp -lrt -o bin/client
+
+    g++ -std=c++11 -O2 -Wall -Wextra -pthread -Icodes codes/client_load.cpp -lrt -o bin/client_load
+
+เปิด Server ใน Terminal หนึ่ง โดยใช้คำสั่งจากแต่ละ Experiment ด้านล่าง
+
+เปิด Client หรือ Load Test ใน Terminal ใหม่ด้วยคำสั่งบน PowerShell:
+
+    docker exec -it osproj bash
+
+จากนั้นจึงรันคำสั่ง Client ภายใน Container
+
+### Experiment 1: Sequential Baseline
+
+วัตถุประสงค์คือสร้างค่าพื้นฐานของระบบที่มี Worker เพียงตัวเดียว
+
+ใน Terminal สำหรับ Server:
+
+    ./bin/server --workers 1 --sync on --delay off
+
+ใน Terminal สำหรับ Client:
+
+    ./bin/client_load --clients 1 --requests 20 --command STATUS --resource 10
+
+การตั้งค่านี้หมายถึง:
+
+- ใช้ Worker 1 ตัว
+- เปิด Synchronization
+- ปิด Random Delay
+- ใช้ Client 1 ตัว
+- ส่งทั้งหมด 20 Requests
+
+ผลที่ควรสังเกต:
+
+- Request ควรสำเร็จทั้งหมด
+- ไม่ควรเกิด Timeout
+- ค่า Throughput และ Average Latency ใช้เป็น Baseline
+
+### Experiment 2: Concurrent Without Synchronization
+
+วัตถุประสงค์คือแสดง Race Condition เมื่อหลาย Worker เข้าถึง Resource เดียวกันโดยไม่มี Mutex
+
+หยุด Server เดิมด้วย `Ctrl+C` แล้วเปิดใหม่ด้วยคำสั่ง:
+
+    ./bin/server --workers 3 --sync off --delay on
+
+ใน Terminal สำหรับ Client ให้ส่งคำสั่งจอง Resource เดียวกันพร้อมกัน:
+
+    ./bin/client_load --clients 20 --requests 1 --command RESERVE --resource 10
+
+การตั้งค่านี้หมายถึง:
+
+- ใช้ Worker 3 ตัว
+- ปิด Synchronization
+- เปิด Random Delay 50-500 milliseconds
+- ให้ Client 20 ตัวจอง Resource หมายเลข 10
+
+ผลที่ควรสังเกต:
+
+- อาจมีมากกว่า 1 Client ที่จองสำเร็จ
+- ผลลัพธ์ขึ้นอยู่กับ Timing ของแต่ละรอบ
+- Server Log อาจแสดงหลาย Worker ตรวจพบ Resource ว่างในช่วงเวลาใกล้กัน
+
+หากยังไม่เห็น Race Condition ให้เริ่ม Server ใหม่และเพิ่มจำนวน Client:
+
+    ./bin/client_load --clients 50 --requests 1 --command RESERVE --resource 10
+
+หรือ:
+
+    ./bin/client_load --clients 100 --requests 1 --command RESERVE --resource 10
+
+### Experiment 3: Concurrent With Synchronization
+
+วัตถุประสงค์คือเปรียบเทียบผลหลังจากเปิด Mutex เพื่อป้องกัน Critical Section
+
+หยุด Server เดิมด้วย `Ctrl+C` แล้วเปิดใหม่ด้วยคำสั่ง:
+
+    ./bin/server --workers 3 --sync on --delay on
+
+ใช้ Workload เดียวกับ Experiment 2:
+
+    ./bin/client_load --clients 20 --requests 1 --command RESERVE --resource 10
+
+ผลที่ควรสังเกต:
+
+- ควรมีผู้จองสำเร็จเพียง 1 Client
+- Client ที่เหลือควรได้รับผลว่า Resource ถูกจองแล้ว
+- ไม่ควรมีการจอง Resource เดียวกันสำเร็จซ้ำหลายครั้ง
+- Server Log จะแสดงการเข้าและออกจาก Critical Section
+
+ผลลัพธ์ที่คาดหวังโดยประมาณคือ:
+
+    success=1
+    failure_or_timeout=19
+
+### Experiment 4: Load หรือ Capacity Test
+
+วัตถุประสงค์คือดูว่าระบบรองรับจำนวน Client ได้มากแค่ไหนก่อนเริ่มเกิด Failure หรือ Timeout
+
+เริ่ม Server ในรูปแบบที่เหมาะกับการวัด Throughput:
+
+    ./bin/server --workers 3 --sync on --delay off
+
+จากนั้นรัน Load Test แบบกำหนดขอบเขต:
+
+    MAX_CLIENTS=100 STEP=5 REQUESTS_PER_CLIENT=20 bash scripts/load_test.sh
+
+Script จะทดสอบตามลำดับ:
+
+    5 Clients, 10 Clients, 15 Clients, ... จนถึง 100 Clients
+
+หากต้องการเพิ่ม Client ต่อไปจนกว่าจะพบ Failure หรือ Timeout ให้ใช้:
+
+    MAX_CLIENTS=0 STEP=5 REQUESTS_PER_CLIENT=20 bash scripts/load_test.sh
+
+เมื่อระบบเริ่มมีปัญหา ให้สังเกต:
+
+- จำนวน Client ในรอบที่เริ่ม Failure
+- จำนวน Request ที่สำเร็จและล้มเหลว
+- Elapsed Time
+- Throughput
+- Average Latency
+- จำนวน Timeout
+
+ควรใช้จุดที่ระบบเริ่ม Failure หรือ Timeout เป็น Saturation Point ของการทดลอง
+
+### ตารางเปรียบเทียบการทดลอง
+
+| Experiment | Workers | Sync | Delay | Workload | ผลที่คาดหวัง |
+|---|---:|---|---|---|---|
+| Sequential Baseline | 1 | On | Off | STATUS | ใช้เป็นค่าพื้นฐาน |
+| Without Synchronization | 3 | Off | On | จอง Resource เดียวกัน | อาจเกิด Success มากกว่า 1 |
+| With Synchronization | 3 | On | On | จอง Resource เดียวกัน | Success ต้องเท่ากับ 1 |
+| Load Test | 3 | On | Off | เพิ่มจำนวน Client | วัดจุดเริ่มต้นของ Failure หรือ Timeout |
 
 ## Cleanup
 
-หยุด Server ด้วย Ctrl+C เพื่อให้ Server ลบ Request Queue:
+หลังจบการทดลอง ให้หยุด Server ด้วย `Ctrl+C` เพื่อให้ Server ปิด Request Queue อย่างถูกต้อง
+
+ออกจาก Container:
+
+    exit
+
+หยุด Docker Compose จาก PowerShell:
 
     docker compose down
 
 ถ้า Client หรือ Queue ค้าง ให้หยุด Container แล้วเริ่มใหม่:
 
     docker rm -f osproj
-
-## การทดลองที่ต้องแสดง
-
-1. Sequential Baseline: Worker 1 ตัว
-2. Concurrent Without Synchronization: Worker 3 ตัว, ปิด Mutex, เปิด Delay
-3. Concurrent With Synchronization: Worker 3 ตัว, เปิด Mutex, เปิด Delay
-
-ใน Experiment 2 คาดหวังให้เห็นโอกาสเกิด Race Condition เมื่อ Client หลายตัวจอง Resource เดียวกัน ส่วน Experiment 3 ต้องมีผู้จองสำเร็จเพียงหนึ่ง Client
