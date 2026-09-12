@@ -1,6 +1,6 @@
-# Concurrent Reservation System
+# Cinema Seat Reservation System
 
-ระบบจองทรัพยากรแบบ Concurrent ด้วย C++11 และ POSIX Message Queue
+ระบบจองที่นั่งโรงภาพยนตร์แบบ Concurrent ด้วย C++11 และ POSIX Message Queue
 
 ## โครงสร้าง
 
@@ -8,6 +8,7 @@
 - codes/client.cpp: Interactive Client
 - codes/client_load.cpp: Load/Stress Test Client
 - codes/common.hpp: Message Struct, Commands และ Constants
+- Makefile: คำสั่ง Build โปรแกรมทั้งหมด
 - scripts/: คำสั่งช่วยรัน Server และ Load Test
 - logs/: Server Log
 
@@ -16,6 +17,7 @@
 - Docker Desktop
 - Docker Compose
 - Linux Container ที่มี g++ และ POSIX Message Queue
+- Make
 - C++11
 
 ## Build ด้วย Docker
@@ -32,23 +34,18 @@
 
 จากนั้น Compile ภายใน Container:
 
-    mkdir -p bin logs
+    make
 
-    g++ -std=c++11 -O2 -Wall -Wextra -pthread -Icodes \
-      codes/server.cpp -lrt -o bin/server
-
-    g++ -std=c++11 -O2 -Wall -Wextra -pthread -Icodes \
-      codes/client.cpp -lrt -o bin/client
-
-    g++ -std=c++11 -O2 -Wall -Wextra -pthread -Icodes \
-      codes/client_load.cpp -lrt -o bin/client_load
+คำสั่ง `make` จะสร้างโปรแกรมไว้ใน `bin/` และจะ Compile ใหม่เฉพาะไฟล์ที่มีการเปลี่ยนแปลง
 
 ## ใช้ Docker Compose
 
     docker compose up -d
     docker exec -it osproj bash
 
-จากนั้น Compile ด้วยคำสั่งเดียวกับด้านบน
+จากนั้น Compile ด้วยคำสั่ง:
+
+    make
 
 ## Run Server
 
@@ -152,13 +149,13 @@ Metrics ที่แสดง:
 
 ภายใน Container ให้ Compile โปรแกรม:
 
-    mkdir -p bin logs
+    make
 
-    g++ -std=c++11 -O2 -Wall -Wextra -pthread -Icodes codes/server.cpp -lrt -o bin/server
+สร้างโปรแกรมทั้งหมดด้วย `make` และลบไฟล์ Binary ด้วย:
 
-    g++ -std=c++11 -O2 -Wall -Wextra -pthread -Icodes codes/client.cpp -lrt -o bin/client
+    make clean
 
-    g++ -std=c++11 -O2 -Wall -Wextra -pthread -Icodes codes/client_load.cpp -lrt -o bin/client_load
+เมื่อแก้ `common.hpp` คำสั่ง `make` จะ Compile โปรแกรมที่ใช้ Header นี้ใหม่โดยอัตโนมัติ
 
 เปิด Server ใน Terminal หนึ่ง โดยใช้คำสั่งจากแต่ละ Experiment ด้านล่าง
 
