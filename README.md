@@ -20,15 +20,43 @@
 - Make
 - C++11
 
-## Build ด้วย Docker
+## Quick Start
+
+ขั้นตอนนี้เหมาะสำหรับผู้ที่ Clone Repository ไปเริ่มใช้งานครั้งแรก
+
+ทำคำสั่งต่อไปนี้บน PowerShell:
+
+    git clone https://github.com/Lxwkxy/cinema-seat-reservation.git
+
+    cd cinema-seat-reservation
+
+    docker compose up -d --build
+
+    docker compose exec cpp bash
+
+ภายใน Container ให้ Build โปรแกรมทั้งหมด:
+
+    make
+
+จากนั้นเปิด Server:
+
+    ./bin/server --workers 3 --sync on --delay on
+
+สำหรับการเปิด Client หรือ Load Test ใน Terminal ใหม่ ให้กลับไปที่โฟลเดอร์โปรเจกต์และใช้:
+
+    docker compose exec cpp bash
+
+ควรใช้คำสั่ง `docker compose` เป็นวิธีหลัก และไม่ควรเปิด Container ซ้ำด้วย `docker run` ในเวลาเดียวกัน
+
+## Manual Docker Setup
 
 สร้าง Image:
 
-    docker build -t os-reservation .
+    docker build -t cinema-seat-reservation .
 
 เปิด Container:
 
-    docker run --name osproj --ipc=host -it --rm -v "${PWD}:/workspace" -w /workspace os-reservation
+    docker run --name osproj --ipc=host -it --rm -v "${PWD}:/workspace" -w /workspace cinema-seat-reservation
 
 คำสั่งนี้ใช้ได้ใน PowerShell เมื่อเปิด Docker Desktop แล้ว
 
@@ -41,7 +69,7 @@
 ## ใช้ Docker Compose
 
     docker compose up -d
-    docker exec -it osproj bash
+    docker compose exec cpp bash
 
 จากนั้น Compile ด้วยคำสั่ง:
 
@@ -75,7 +103,7 @@
 
 เปิด Terminal เพิ่มเติมด้วยคำสั่ง:
 
-    docker exec -it osproj bash
+    docker compose exec cpp bash
 
 จากนั้นรัน:
 
@@ -145,7 +173,7 @@ Metrics ที่แสดง:
 
     docker compose up -d
 
-    docker exec -it osproj bash
+    docker compose exec cpp bash
 
 ภายใน Container ให้ Compile โปรแกรม:
 
@@ -161,7 +189,7 @@ Metrics ที่แสดง:
 
 เปิด Client หรือ Load Test ใน Terminal ใหม่ด้วยคำสั่งบน PowerShell:
 
-    docker exec -it osproj bash
+    docker compose exec cpp bash
 
 จากนั้นจึงรันคำสั่ง Client ภายใน Container
 
