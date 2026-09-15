@@ -22,33 +22,34 @@
 flowchart LR
     C1[Interactive Client]
     C2[Client Load Test]
-    R[(POSIX Request Queue\n/osproj_requests)]
-    W1[Worker 1]
-    W2[Worker 2]
-    WN[Worker N]
-    D[(Shared Reservation Data\n20 Resources)]
+    R[(POSIX Request Queue<br/>/osproj_requests)]
+    W[Worker Pool<br/>Worker 1 • Worker 2 • Worker N]
+    D[(Shared Reservation Data<br/>20 Resources)]
     M{{Resource Mutex}}
-    Q1[(Client Response Queue)]
-    Q2[(Load Response Queue)]
+
+    subgraph RESPONSES[Response Queues]
+        direction TB
+        Q1[(Client Response Queue)]
+        Q2[(Load Response Queue)]
+    end
+
+    O1[Response to Interactive Client]
+    O2[Response to Load Test Client]
 
     C1 -->|Request| R
     C2 -->|Request| R
-    R --> W1
-    R --> W2
-    R --> WN
-    W1 --> D
-    W2 --> D
-    WN --> D
+    R -->|dispatch to an available worker| W
+    W -->|Read / Update| D
     M -. protects .-> D
-    W1 -->|Response| Q1
-    W2 -->|Response| Q1
-    WN -->|Response| Q2
-    Q1 --> C1
-    Q2 --> C2
+    W -->|Response| Q1
+    W -->|Response| Q2
+    Q1 --> O1
+    Q2 --> O2
 ```
 
-Server มี Request Queue ร่วมเพียงหนึ่ง Queue และ Worker ทุกตัวรับงานจาก Queue นี้โดยตรง
-เมื่อ Worker รับ Request แล้วจึงอ่านหรือแก้ไข Shared Reservation Data
+Client ทั้งสองประเภทส่ง Request เข้า Queue เดียวกัน จากนั้น Worker ที่ว่างใน Pool
+จะรับงานไปประมวลผล และส่ง Response ไปยัง Queue ที่ตรงกับประเภทของ Client
+ส่วน Mutex ใช้ป้องกันการแก้ไขข้อมูลการจองพร้อมกัน
 
 ## 3. องค์ประกอบหลัก
 
