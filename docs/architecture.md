@@ -1,0 +1,274 @@
+# Cinema Seat Reservation System: Architecture
+
+เอกสารนี้อธิบายโครงสร้างและการทำงานภายในของระบบจองที่นั่งโรงภาพยนตร์
+รายละเอียดการ Build และการทดลองอยู่ใน [README.md](../README.md)
+
+## 1. ขอบเขตระบบ
+
+ระบบนี้เป็นโปรเจกต์ Operating Systems ที่สาธิตการทำงานของ:
+
+- C++11 บน Linux ภายใน Docker
+- POSIX Named Message Queue สำหรับสื่อสารระหว่าง Process
+- Worker Threads สำหรับประมวลผล Client หลายตัวพร้อมกัน
+- Shared Reservation Data สำหรับ Resource จำนวน 20 รายการ
+- Resource Mutex สำหรับป้องกัน Race Condition
+
+ระบบเก็บข้อมูลการจองไว้ในหน่วยความจำของ Server เท่านั้น ไม่มีฐานข้อมูลถาวร
+เมื่อ Server หยุดทำงาน ข้อมูลการจองจะถูกล้าง
+
+## 2. ภาพรวมสถาปัตยกรรม
+
+```mermaid
+flowchart LR
+    C1[Interactive Client]
+    C2[Client Load Test]
+    R[(POSIX Request Queue\n/osproj_requests)]
+    W1[Worker 1]
+    W2[Worker 2]
+    WN[Worker N]
+    D[(Shared Reservation Data\n20 Resources)]
+    M{{Resource Mutex}}
+    Q1[(Client Response Queue)]
+    Q2[(Load Response Queue)]
+
+    C1 -->|Request| R
+    C2 -->|Request| R
+    R --> W1
+    R --> W2
+    R --> WN
+    W1 --> D
+    W2 --> D
+    WN --> D
+    M -. protects .-> D
+    W1 -->|Response| Q1
+    W2 -->|Response| Q1
+    WN -->|Response| Q2
+    Q1 --> C1
+    Q2 --> C2
+```
+
+Server มี Request Queue ร่วมเพียงหนึ่ง Queue และ Worker ทุกตัวรับงานจาก Queue นี้โดยตรง
+เมื่อ Worker รับ Request แล้วจึงอ่านหรือแก้ไข Shared Reservation Data
+
+## 3. องค์ประกอบหลัก
+
+### Server
+
+ไฟล์ `codes/server.cpp` ทำหน้าที่:
+
+- สร้างและดูแล `/osproj_requests`
+- สร้าง Worker Threads ตามค่า `--workers`
+- ตรวจสอบและประมวลผลคำสั่งจาก Client
+- จัดการ Resource ทั้ง 20 รายการ
+- พิมพ์ Server Log และส่ง Response กลับ Client
+
+ตัวเลือกสำคัญ:
+
+| Option | หน้าที่ |
+|---|---|
+| `--workers N` | จำนวน Worker Threads |
+| `--sync on\|off` | เปิดหรือปิด Resource Mutex |
+| `--delay on\|off` | เปิดหรือปิด Random Delay 50–500 ms |
+| `--verbose on\|off` | เปิดหรือปิดรายละเอียด Server Log |
+
+### Interactive Client
+
+ไฟล์ `codes/client.cpp` เป็น Client สำหรับการใช้งานผ่าน Terminal
+ผู้ใช้สามารถส่ง `LIST`, `STATUS`, `RESERVE`, `CANCEL` และ `QUIT`
+หรือใช้โหมด `--once` เพื่อส่งคำสั่งเดียวแล้วจบการทำงาน
+
+### Load Client
+
+ไฟล์ `codes/client_load.cpp` สร้าง Logical Clients และส่ง Request หลายรายการ
+ใช้สำหรับ Sequential Baseline, Race Condition และ Load Test
+
+### Shared Headers
+
+- `codes/common.hpp` — ค่าคงที่, Command, Request/Response Message และ Resource Model
+- `codes/message_queue.hpp` — Wrapper สำหรับเปิด, สร้าง, ส่ง, รับ และ cleanup POSIX Message Queue
+
+## 4. Request และ Response Flow
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant R as /osproj_requests
+    participant W as Worker
+    participant D as Reservation Data
+    participant Q as Client Response Queue
+
+    C->>C: Create response queue
+    C->>R: Send Request + reply_queue name
+    W->>R: Receive Request
+    W->>D: Read or update resource
+    D-->>W: Result
+    W->>Q: Send Response
+    Q-->>C: Receive Response
+```
+
+ลำดับการทำงานมีดังนี้:
+
+1. Server สร้าง Request Queue ชื่อ `/osproj_requests`
+2. Client สร้าง Response Queue ของตัวเอง
+3. Client ส่ง Request พร้อมชื่อ Response Queue ไปยัง Server
+4. Worker ที่ว่างรับ Request และประมวลผล
+5. Worker ส่ง Response กลับไปยัง Queue ของ Client ตัวนั้น
+6. Client รอ Response ก่อนส่งคำสั่งถัดไป
+
+ถ้าไม่สามารถส่งหรือรับข้อมูลภายใน 5 วินาที Request นั้นจะถูกนับเป็น Timeout
+
+## 5. Message Queue Design
+
+### Queue ที่ใช้
+
+| Queue | ผู้สร้าง | หน้าที่ |
+|---|---|---|
+| `/osproj_requests` | Server | รับ Request จาก Client ทุกตัว |
+| `/osproj_client_<pid>_<client_id>` | Interactive Client | ส่ง Response กลับ Client แบบ Interactive |
+| `/osproj_load_<pid>_<client_id>` | Load Client | ส่ง Response กลับ Logical Client |
+
+Response Queue แยกตาม Process และ Client ID เพื่อให้ Worker ส่งคำตอบกลับถูก Client
+ทุก Request ใช้ priority 0 และ Request Queue รองรับได้สูงสุด 10 ข้อความตามค่าที่กำหนดในโค้ด
+
+### Request Message
+
+ประกาศใน `codes/common.hpp` และส่งเป็นโครงสร้าง binary ระหว่าง Client กับ Server
+
+| Field | ความหมาย |
+|---|---|
+| `command` | `LIST=1`, `STATUS=2`, `RESERVE=3`, `CANCEL=4`, `QUIT=5` |
+| `client_id` | ID ของ Client ต้องเป็นจำนวนเต็มบวก |
+| `resource_id` | Resource หมายเลข 1–20; `LIST` และ `QUIT` ใช้ `-1` |
+| `reply_queue` | ชื่อ Queue สำหรับส่ง Response กลับ |
+
+### Response Message
+
+| Field | ความหมาย |
+|---|---|
+| `command` | คำสั่งที่ Response อ้างถึง |
+| `client_id` | Client ที่ส่ง Request |
+| `success` | `1` เมื่อสำเร็จ, `0` เมื่อถูกปฏิเสธ |
+| `resource_id` | Resource ที่เกี่ยวข้อง |
+| `owner_id` | เจ้าของ Resource หรือ `-1` เมื่อไม่มีเจ้าของ |
+| `text` | ข้อความผลลัพธ์สำหรับแสดงให้ผู้ใช้เห็น |
+
+## 6. Reservation Data และ Critical Section
+
+Resource แต่ละรายการมีข้อมูลหลักคือ:
+
+```text
+Resource ID: 1..20
+Owner ID:    -1 เมื่อว่าง หรือ Client ID เมื่อถูกจอง
+```
+
+การจอง Resource มีขั้นตอนสำคัญคือ:
+
+```text
+ตรวจสอบว่า Resource ว่าง
+        ↓
+Random Delay 50–500 ms (เมื่อเปิด --delay on)
+        ↓
+เปลี่ยน Owner เป็น Client ID
+```
+
+เมื่อใช้ `--sync on` ขั้นตอนทั้งหมดอยู่ภายใน Resource Mutex เดียวกัน
+จึงมี Client เดียวเท่านั้นที่ตรวจสอบและจอง Resource นั้นได้ในเวลาเดียวกัน
+
+เมื่อใช้ `--sync off` ระบบจะไม่ถือ Resource Mutex ระหว่าง Check/Update
+แต่ยังใช้ Atomic Owner เพื่อไม่ให้เกิด Data Race ในระดับหน่วยความจำ
+การแยก Check กับ Update นี้ตั้งใจเปิดช่องให้เกิด Race Condition สำหรับการทดลอง
+
+สำหรับคำสั่ง `LIST` Server จะ Lock Resource ตามลำดับ ID เพื่อสร้าง Snapshot ที่สอดคล้องกัน
+แล้วจึงปล่อย Lock ก่อนจัดรูปแบบข้อความตอบกลับ
+
+## 7. Concurrency Experiments
+
+| Experiment | Workers | Sync | Delay | จุดประสงค์ |
+|---|---:|---|---|---|
+| Sequential Baseline | 1 | On | Off | วัดค่าพื้นฐาน |
+| Without Synchronization | 3 | Off | On | แสดง Race Condition |
+| With Synchronization | 3 | On | On | แสดงว่าจองสำเร็จเพียง 1 Client |
+| Load Test | 3 | On | Off | หาจุดเริ่มต้นของ Timeout หรือ Failure |
+
+### Race Condition
+
+1. เปิด Server ด้วย `--workers 3 --sync off --delay on`
+2. ส่ง `RESERVE` ไปยัง Resource เดียวกันจาก Client อย่างน้อย 5 ตัว
+3. สังเกตจำนวน Client ที่ได้รับผลสำเร็จ
+
+Random Delay ที่อยู่ระหว่าง Check และ Update เพิ่มโอกาสให้ Worker หลายตัวอ่านสถานะว่างพร้อมกัน
+
+### Synchronized Reservation
+
+1. เปิด Server ด้วย `--workers 3 --sync on --delay on`
+2. ส่ง `RESERVE` ไปยัง Resource เดิมจาก Client หลายตัว
+3. ควรมีผู้จองสำเร็จเพียง 1 Client และที่เหลือถูกปฏิเสธ
+
+## 8. Logging และ Observability
+
+เมื่อเปิด `--verbose on` Server จะแสดง Log ใน Terminal โดยแต่ละบรรทัดประกอบด้วย:
+
+```text
+[sequence] [time] [Worker ID] [Client ID] [Command] [Resource ID] message
+```
+
+Log สำคัญสำหรับการทดลองประกอบด้วย:
+
+- `received request`
+- `check resource: AVAILABLE` หรือ `RESERVED`
+- `entering critical section`
+- `leaving critical section`
+- ผลลัพธ์ของคำสั่ง
+
+Log ใช้ยืนยันว่า Worker ใดประมวลผล Request และใช้แสดงความแตกต่างระหว่าง `--sync on`
+กับ `--sync off` โดย Log แสดงออกทาง Terminal และไม่ได้เป็นข้อมูลถาวรของระบบ
+
+## 9. Lifecycle และ Cleanup
+
+```text
+Start Server
+    ↓
+Create /osproj_requests
+    ↓
+Start Worker Threads
+    ↓
+Receive and process Requests
+    ↓
+Ctrl+C
+    ↓
+Stop Workers and remove Request Queue
+```
+
+Client สร้าง Response Queue ของตัวเองและลบ Queue เมื่อจบการทำงานตามปกติ
+ถ้า Process ถูกบังคับหยุด อาจต้องตรวจสอบ Queue ค้างก่อนเปิด Server ใหม่
+
+## 10. Container and Build Architecture
+
+```text
+Host Machine
+└── Docker Compose
+    └── cpp container (Ubuntu 22.04)
+        ├── g++ / Make
+        ├── POSIX Message Queue
+        └── /workspace  ← project directory mounted from host
+```
+
+`docker-compose.yml` ใช้ `ipc: host` เพื่อให้ Process ที่อยู่ใน Container เดียวกัน
+เข้าถึง POSIX Message Queue namespace เดียวกันได้ และใช้ volume mount เพื่อให้ Source Code
+กับ Binary ใน `/workspace` ตรงกับไฟล์บนเครื่อง Host
+
+## 11. Source-to-Responsibility Map
+
+| File | Responsibility |
+|---|---|
+| `codes/server.cpp` | Server, Worker Threads, Reservation Logic และ Logging |
+| `codes/client.cpp` | Interactive/Once Client |
+| `codes/client_load.cpp` | Logical Clients และ Load Metrics |
+| `codes/common.hpp` | Shared Constants, Commands และ Message Structures |
+| `codes/message_queue.hpp` | POSIX Message Queue Wrapper และ Client Connection |
+| `scripts/run_server.sh` | ช่วยเริ่ม Server |
+| `scripts/run_clients.sh` | ช่วยเริ่ม Client หลายตัว |
+| `scripts/load_test.sh` | เพิ่มจำนวน Client สำหรับ Load Test |
+| `Makefile` | Build และ Clean Binary |
+| `Dockerfile` | สร้าง Linux Build Environment |
+| `docker-compose.yml` | สร้างและเปิด Container |

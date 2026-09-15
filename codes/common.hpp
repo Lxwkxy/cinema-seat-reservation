@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <string>
+#include <sstream>
 
 static const char REQUEST_QUEUE_NAME[] = "/osproj_requests";
 // 10 is accepted by the default Linux mqueue limit on most installations.
@@ -20,6 +21,7 @@ static const int REQUEST_TIMEOUT_SECONDS = 5;
 static const int MIN_RANDOM_DELAY_MS = 50;
 static const int MAX_RANDOM_DELAY_MS = 500;
 static const int LOAD_CLIENT_ID_OFFSET = 10000;
+static const int NO_OWNER = -1;
 
 enum class Command : int {
     LIST = 1,
@@ -52,7 +54,7 @@ struct ResourceRecord {
 
     // ตรวจสอบว่า resource ถูกจองหรือไม่
     bool is_reserved() const {
-        return owner_id != -1;
+        return owner_id != NO_OWNER;
     }
 
     // จอง resource ให้ client
@@ -62,13 +64,13 @@ struct ResourceRecord {
 
     // ยกเลิกการจอง resource
     void release() {
-        owner_id = -1;
+        owner_id = NO_OWNER;
     }
 };
 
 // สร้างเวลาหมดอายุ
 inline timespec deadline_after_seconds(int seconds) {
-    timespec deadline;
+    timespec deadline = {};
     clock_gettime(CLOCK_REALTIME, &deadline);
     deadline.tv_sec += seconds;
     return deadline;
@@ -78,7 +80,7 @@ inline timespec deadline_after_seconds(int seconds) {
 inline bool parse_integer(const std::string& token, int& value) {
     if (token.empty()) return false;
 
-    char* end = NULL;
+    char* end = nullptr;
     errno = 0;
     const long parsed = std::strtol(token.c_str(), &end, 10);
     if (errno == ERANGE || end == token.c_str() || *end != '\0' ||
@@ -129,6 +131,31 @@ inline void copy_text(char* destination, std::size_t capacity,
 // ตรวจสอบว่า resource ID ถูกต้องหรือไม่
 inline bool valid_resource_id(int resource_id) {
     return resource_id >= 1 && resource_id <= RESOURCE_COUNT;
+}
+
+struct ParsedCommand {
+    Command command = Command::LIST;
+    int resource_id = NO_OWNER;
+};
+
+// Both interactive input and --once use the same grammar.
+inline bool parse_command_line(const std::string& line, ParsedCommand& result) {
+    std::istringstream input(line);
+    std::string token;
+    ParsedCommand parsed;
+    if (!(input >> token) || !parse_command(token, parsed.command)) return false;
+    if (command_requires_resource(parsed.command)) {
+        if (!(input >> token) || !parse_integer(token, parsed.resource_id) ||
+            !valid_resource_id(parsed.resource_id)) return false;
+    }
+    if (input >> token) return false;
+    result = parsed;
+    return true;
+}
+
+inline const char* on_off(bool enabled) {
+    if (enabled) return "on";
+    return "off";
 }
 
 #endif

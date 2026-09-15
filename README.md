@@ -56,7 +56,7 @@ make
 ใน Terminal ที่อยู่ภายใน Container:
 
 ~~~bash
-./bin/server --workers 3 --sync on --delay on
+./bin/server --workers 3 --sync on --delay on --verbose on
 ~~~
 
 Terminal นี้จะทำงานเป็น Server และควรเปิดค้างไว้
@@ -103,6 +103,68 @@ QUIT
 
 Resource ID ที่ใช้งานได้อยู่ระหว่าง 1 ถึง 20
 
+## ภาพรวมการทำงาน
+
+ระบบใช้ **POSIX Message Queue** ให้ Client หลายตัวส่งคำสั่งไปยัง Server
+ที่มี Worker หลายตัวทำงานพร้อมกัน
+
+```text
+Client ── Request ──> /osproj_requests ──> Worker ── Response ──> Client
+                                      │
+                                      └── Shared Reservation Data
+                                          + Resource Mutex
+```
+
+การทำงานมี 4 ขั้นตอน:
+
+1. Client ส่ง Request ไปที่ `/osproj_requests`
+2. Worker ที่ว่างรับ Request และประมวลผลคำสั่ง
+3. Worker ส่ง Response กลับไปยัง Queue ของ Client
+4. Resource Mutex ป้องกันการจอง Resource เดียวกันพร้อมกัน
+
+Request ประกอบด้วย `command`, `client_id`, `resource_id` และชื่อ Response Queue
+ส่วน Response ประกอบด้วยสถานะสำเร็จ, เจ้าของ Resource และข้อความผลลัพธ์
+
+คำสั่งที่รองรับคือ `LIST`, `STATUS`, `RESERVE`, `CANCEL` และ `QUIT`
+โดย Resource ID อยู่ระหว่าง 1–20
+
+รายละเอียดการออกแบบระบบอยู่ที่ [docs/architecture.md](docs/architecture.md)
+
+## Demo: 5 Clients ส่งคำสั่งต่างกัน
+
+ใช้ Server จาก Quick Start โดยให้เปิดด้วย `--sync on` และ `--verbose on`
+ถ้า Resource 1 หรือ 2 ถูกจองไปแล้ว ให้หยุด Server แล้วเริ่มใหม่ก่อน Demo
+
+### Demo แบบ 6 Terminals สำหรับนำเสนอ
+
+แต่ละ Client Terminal เข้า Container ด้วย `docker compose exec cpp bash` แล้วเปิดดังนี้:
+
+| Terminal | โปรแกรม | คำสั่งที่จะส่งพร้อมกัน |
+|---|---|---|
+| 1 | Server ตามคำสั่งด้านบน | ดู Log |
+| 2 | `./bin/client --id 1` | `LIST` |
+| 3 | `./bin/client --id 2` | `STATUS 1` |
+| 4 | `./bin/client --id 3` | `RESERVE 1` |
+| 5 | `./bin/client --id 4` | `CANCEL 2` |
+| 6 | `./bin/client --id 5` | `QUIT` |
+
+ก่อนเริ่ม ให้ Terminal 5 ส่ง `RESERVE 2` และรอ SUCCESS แล้วเตรียมคำสั่งตามตาราง
+กด Enter ในทั้ง 5 Client Terminals ในช่วงใกล้กัน หรือให้สมาชิกแต่ละคนควบคุมคนละ Terminal
+ทุกคำสั่งควรสำเร็จ; LIST/STATUS อาจเห็นสถานะก่อนหรือหลังการแก้ไขตามลำดับประมวลผล
+QUIT ปิดเฉพาะ Client-5 ส่วน Server ยังทำงานต่อ
+
+### อ่าน Server Log
+
+เปิด Log ด้วย `--verbose on` ทุกบรรทัดมี `seq`, เวลา, Worker ID, Client ID, Command
+และ Resource ID โดย LIST แสดง `Resource-ALL` และ QUIT แสดง `Resource-NONE`
+เมื่อเปิด sync จะมี `entering critical section` หลังได้ lock และ `leaving critical section`
+ก่อนปล่อย lock รวมถึงคำสั่งที่ถูกปฏิเสธ; LIST บันทึกขอบเขตการล็อก snapshot ทั้งชุด
+เมื่อปิด sync จะไม่มี Log เข้า/ออก Critical Section เพราะไม่ได้ถือ Resource Mutex
+
+เหตุการณ์ถูกเก็บพร้อมเวลาและ sequence ณ จุดเกิดจริง แล้วพิมพ์รวมหลังปล่อย Resource Mutex
+บรรทัดจากคนละ Request จึงอาจไม่เรียงตาม `seq`; ใช้ sequence เปรียบเทียบลำดับเหตุการณ์
+Log ตรวจสถานะ `check resource: AVAILABLE/RESERVED` ช่วยอธิบายช่วง check/update
+
 ## Load Test
 
 รัน Load Client ภายใน Container:
@@ -134,12 +196,11 @@ MAX_CLIENTS=100 STEP=5 REQUESTS_PER_CLIENT=20 bash scripts/load_test.sh
 
 Metrics ที่แสดง:
 
-- Total Requests
-- Success
-- Failure หรือ Timeout
-- Elapsed Time
-- Throughput
-- Average Latency
+- Success: จำนวนคำสั่งที่สำเร็จ
+- Rejected: จำนวนคำสั่งที่ถูกปฏิเสธ เช่น Resource ถูกจองแล้ว
+- Timeout: จำนวนคำสั่งที่ใช้เวลานานเกินกำหนด
+- Throughput: จำนวน Request ต่อวินาที
+- Average Latency: เวลาเฉลี่ยต่อ Request
 
 Script นี้ต้องรันภายใน Container และต้องใช้ Bash ไม่ใช่ sh
 
@@ -172,7 +233,7 @@ Script นี้ต้องรันภายใน Container และต้�
 ทดสอบ Race Condition โดยปิด Mutex:
 
 ~~~bash
-./bin/server --workers 3 --sync off --delay on
+./bin/server --workers 3 --sync off --delay on --verbose on
 ~~~
 
 เปิดอีก Terminal แล้วให้หลาย Client จอง Resource เดียวกัน:
@@ -192,7 +253,7 @@ Script นี้ต้องรันภายใน Container และต้�
 ทดสอบการใช้ Mutex:
 
 ~~~bash
-./bin/server --workers 3 --sync on --delay on
+./bin/server --workers 3 --sync on --delay on --verbose on
 ~~~
 
 ใช้คำสั่ง Client เดิม:
@@ -205,37 +266,35 @@ Script นี้ต้องรันภายใน Container และต้�
 
 - มี Client จองสำเร็จเพียง 1 ตัว
 - Client ที่เหลือได้รับผลว่า Resource ถูกจองแล้ว
-- โดยประมาณ success=1 และ failure_or_timeout=19
+- success=1, rejected=19 และ timeouts=0 หากระบบตอบทันเวลา (exit code 3)
 
 ### Experiment 4: Load หรือ Capacity Test
 
-เปิด Server สำหรับวัด Load:
+เปิด Server สำหรับวัด Load ใน Terminal หนึ่ง:
 
 ~~~bash
 ./bin/server --workers 3 --sync on --delay off
 ~~~
 
-จากนั้นรัน Load Test แบบต่อเนื่อง:
+จากนั้นเปิดอีก Terminal แล้วรัน:
 
 ~~~bash
 bash scripts/load_test.sh
 ~~~
 
-หรือกำหนดจำนวน Client สูงสุด:
+กำหนดจำนวน Client สูงสุดได้ด้วย:
 
 ~~~bash
 MAX_CLIENTS=100 STEP=5 REQUESTS_PER_CLIENT=20 bash scripts/load_test.sh
 ~~~
 
-ระบบจะทดสอบตั้งแต่ 5, 10, 15 ไปจนถึง 100 Clients
-
-หากต้องการทดสอบต่อเนื่องจนพบ Failure หรือ Timeout:
+หากต้องการทดสอบต่อไปจนกว่าจะพบ Failure หรือ Timeout:
 
 ~~~bash
 MAX_CLIENTS=0 STEP=5 REQUESTS_PER_CLIENT=20 bash scripts/load_test.sh
 ~~~
 
-ให้บันทึกค่ารอบที่เริ่มเกิดปัญหา พร้อม Throughput, Average Latency และจำนวน Failure หรือ Timeout
+ให้สังเกตจำนวน Client ที่เริ่มเกิดปัญหา พร้อม Throughput, Average Latency และ Timeout
 
 ## สรุปการตั้งค่าแต่ละ Experiment
 
@@ -252,6 +311,7 @@ MAX_CLIENTS=0 STEP=5 REQUESTS_PER_CLIENT=20 bash scripts/load_test.sh
 .
 ├── codes/
 │   ├── common.hpp
+│   ├── message_queue.hpp
 │   ├── server.cpp
 │   ├── client.cpp
 │   └── client_load.cpp
@@ -259,6 +319,8 @@ MAX_CLIENTS=0 STEP=5 REQUESTS_PER_CLIENT=20 bash scripts/load_test.sh
 │   ├── run_server.sh
 │   ├── run_clients.sh
 │   └── load_test.sh
+├── docs/
+│   └── architecture.md
 ├── Makefile
 ├── Dockerfile
 ├── docker-compose.yml
@@ -281,7 +343,7 @@ exit
 docker compose down
 ~~~
 
-ถ้า Container ค้าง:
+ถ้า Container ค้าง ให้ใช้:
 
 ~~~powershell
 docker compose down --remove-orphans

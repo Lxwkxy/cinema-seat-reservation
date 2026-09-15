@@ -27,7 +27,7 @@ for ((clients=STEP; MAX_CLIENTS == 0 || clients <= MAX_CLIENTS; clients+=STEP));
   echo "load_test_clients=$clients exit_status=$status"
 
   if [ "$status" -ne 0 ]; then
-    echo "System reached failure/timeout at $clients clients"
+    echo "Load test stopped at $clients clients (exit status $status; see metrics above)"
     last_status="$status"
     break
   fi

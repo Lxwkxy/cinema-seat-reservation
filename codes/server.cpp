@@ -1,296 +1,277 @@
-#include "common.hpp"
+#include "message_queue.hpp"
 
-#include <algorithm>
 #include <array>
 #include <atomic>
-#include <cerrno>
 #include <chrono>
 #include <csignal>
-#include <cstdlib>
-#include <cstring>
-#include <ctime>
-#include <fcntl.h>
 #include <iostream>
-#include <mqueue.h>
 #include <mutex>
 #include <random>
-#include <sstream>
-#include <string>
 #include <thread>
 #include <vector>
-#include <unistd.h>
 
-std::atomic<bool> running(true);
+namespace {
+
+struct ServerOptions {
+    int workers = 3;
+    bool synchronize = true;
+    bool delay = false;
+    bool verbose = false;
+};
+
+struct ResourceState {
+    std::mutex mutex;
+    // Atomic accesses keep the --sync off demonstration defined in C++.
+    // The availability check and update remain separate, so double booking
+    // is still possible without the resource mutex.
+    std::atomic<int> owner{NO_OWNER};
+};
+
+using ResourceSnapshot = std::array<ResourceRecord, RESOURCE_COUNT>;
+
+ServerOptions options;
+std::array<ResourceState, RESOURCE_COUNT> resources;
 std::mutex log_mutex;
-std::array<std::mutex, RESOURCE_COUNT> resource_mutexes;
-std::vector<ResourceRecord> resources;
-bool synchronization_enabled = true;
-bool random_delay_enabled = false;
+std::atomic<unsigned long long> log_sequence{0};
+static_assert(ATOMIC_BOOL_LOCK_FREE == 2, "Signal handling requires lock-free bool");
+std::atomic<bool> stop_requested{false};
 
 void handle_signal(int) {
-    running.store(false);
+    stop_requested.store(true);
 }
 
-long long now_milliseconds() {
-    const std::chrono::milliseconds value =
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::system_clock::now().time_since_epoch());
-    return value.count();
-}
+struct LogEvent {
+    unsigned long long sequence = 0;
+    long long timestamp = 0;
+    const char* message = nullptr;
+};
 
-void log_message(int worker_id, const RequestMessage& request,
-                 const std::string& message) {
-    std::lock_guard<std::mutex> guard(log_mutex);
-    std::cout << "[t=" << now_milliseconds() << "] "
-              << "[Worker-" << worker_id << "] "
-              << "[Client-" << request.client_id << "] "
-              << "[" << command_name(static_cast<Command>(request.command))
-              << "] " << message << '\n';
-}
-
-void add_random_delay() {
-    if (!random_delay_enabled) {
-        return;
+class RequestTrace {
+public:
+    void record(const char* message) {
+        if (!options.verbose) return;
+        auto& event = events_[count_++];
+        event.sequence = ++log_sequence;
+        event.timestamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        event.message = message;
     }
 
-    static thread_local std::mt19937 generator(
-        static_cast<unsigned>(std::chrono::high_resolution_clock::now()
-                                  .time_since_epoch()
-                                  .count()));
+    void print(int worker_id, const RequestMessage& request) const {
+        if (!options.verbose) return;
+        std::lock_guard<std::mutex> guard(log_mutex);
+        for (std::size_t index = 0; index < count_; ++index) {
+            const auto& event = events_[index];
+            std::cout << "[seq=" << event.sequence << "] [t=" << event.timestamp
+                      << "] [Worker-" << worker_id << "] [Client-" << request.client_id
+                      << "] [" << command_name(static_cast<Command>(request.command))
+                      << "] [Resource-";
+            if (static_cast<Command>(request.command) == Command::LIST)
+                std::cout << "ALL";
+            else if (static_cast<Command>(request.command) == Command::QUIT)
+                std::cout << "NONE";
+            else
+                std::cout << request.resource_id;
+            std::cout << "] " << event.message << '\n';
+        }
+        std::cout.flush();
+    }
+
+private:
+    // Each request records at most five events; no allocation under a resource lock.
+    std::array<LogEvent, 5> events_;
+    std::size_t count_ = 0;
+};
+
+class CriticalSectionLog {
+public:
+    CriticalSectionLog(RequestTrace& trace, bool locked)
+        : trace_(trace), locked_(locked) {
+        if (locked_) trace_.record("entering critical section");
+    }
+    ~CriticalSectionLog() {
+        if (locked_) trace_.record("leaving critical section");
+    }
+    CriticalSectionLog(const CriticalSectionLog&) = delete;
+    CriticalSectionLog& operator=(const CriticalSectionLog&) = delete;
+
+private:
+    RequestTrace& trace_;
+    bool locked_;
+};
+
+void add_random_delay() {
+    if (!options.delay) return;
+    static thread_local std::mt19937 generator(std::random_device{}());
     std::uniform_int_distribution<int> distribution(
         MIN_RANDOM_DELAY_MS, MAX_RANDOM_DELAY_MS);
-    std::this_thread::sleep_for(
-        std::chrono::milliseconds(distribution(generator)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(distribution(generator)));
 }
 
 ResponseMessage make_response(const RequestMessage& request, bool success,
-                              int resource_id, int owner_id,
-                              const std::string& text) {
+                              int owner_id, const std::string& text) {
     ResponseMessage response = {};
     response.command = request.command;
     response.client_id = request.client_id;
-    if (success) {
-        response.success = 1;
-    } else {
-        response.success = 0;
-    }
-    response.resource_id = resource_id;
+    response.success = static_cast<int>(success);
+    response.resource_id = request.resource_id;
     response.owner_id = owner_id;
     copy_text(response.text, sizeof(response.text), text);
     return response;
 }
 
-ResourceRecord& resource_at(int resource_id) {
-    return resources[static_cast<std::size_t>(resource_id - 1)];
-}
-
-ResponseMessage handle_list(const RequestMessage& request, int worker_id) {
-    std::ostringstream output;
+ResourceSnapshot snapshot_resources(RequestTrace& trace) {
+    // Acquire locks in ascending order for a consistent snapshot.
+    std::array<std::unique_lock<std::mutex>, RESOURCE_COUNT> guards;
+    if (options.synchronize) {
+        for (std::size_t index = 0; index < resources.size(); ++index)
+            guards[index] = std::unique_lock<std::mutex>(resources[index].mutex);
+    }
+    // Construct after the guards so the exit event is captured before unlocking.
+    CriticalSectionLog critical_section(trace, options.synchronize);
+    ResourceSnapshot snapshot = {};
     for (std::size_t index = 0; index < resources.size(); ++index) {
-        const ResourceRecord& resource = resources[index];
-        output << resource.id << ":";
-        if (resource.is_reserved()) {
-            output << "RESERVED(Client-" << resource.owner_id << ")";
-        } else {
-            output << "AVAILABLE";
-        }
-        if (index + 1 < resources.size()) {
-            output << " ";
-        }
+        snapshot[index].id = static_cast<int>(index + 1);
+        snapshot[index].owner_id = resources[index].owner.load();
     }
-
-    log_message(worker_id, request, "listed all resources");
-    return make_response(request, true, -1, -1, output.str());
+    return snapshot;
 }
 
-ResponseMessage handle_status(const RequestMessage& request, int worker_id,
-                              ResourceRecord& resource) {
+ResponseMessage handle_list(const RequestMessage& request, RequestTrace& trace) {
+    const auto snapshot = snapshot_resources(trace);
+    // Formatting happens after all resource locks have been released.
     std::ostringstream output;
-    output << "Resource " << resource.id << ": ";
-    if (resource.is_reserved()) {
-        output << "RESERVED, owner=Client-" << resource.owner_id;
-    } else {
-        output << "AVAILABLE";
+    for (const auto& resource : snapshot) {
+        if (resource.id > 1) output << ' ';
+        output << resource.id << ':';
+        if (resource.is_reserved())
+            output << "RESERVED(Client-" << resource.owner_id << ')';
+        else
+            output << "AVAILABLE";
     }
-
-    log_message(worker_id, request, "read resource status");
-    return make_response(request, true, resource.id, resource.owner_id,
-                         output.str());
+    return make_response(request, true, NO_OWNER, output.str());
 }
 
-ResponseMessage handle_reserve(const RequestMessage& request, int worker_id,
-                               ResourceRecord& resource) {
-    log_message(worker_id, request, "checking availability");
-    if (resource.is_reserved()) {
-        return make_response(request, false, resource.id, resource.owner_id,
-                             "Resource is already reserved");
-    }
+struct ResourceResult {
+    bool success = false;
+    int owner = NO_OWNER;
+    const char* message = "";
+};
 
-    log_message(worker_id, request, "resource is AVAILABLE");
-    add_random_delay();
+ResourceResult update_resource(const RequestMessage& request, RequestTrace& trace) {
+    auto& resource = resources[static_cast<std::size_t>(request.resource_id - 1)];
+    std::unique_lock<std::mutex> guard(resource.mutex, std::defer_lock);
+    if (options.synchronize) guard.lock();
+    CriticalSectionLog critical_section(trace, guard.owns_lock());
 
-    // Intentionally no second check. This exposes the race window
-    // when the server runs with --sync off.
-    resource.reserve_for(request.client_id);
-
-    log_message(worker_id, request, "reserved resource");
-    return make_response(request, true, resource.id, resource.owner_id,
-                         "Reservation successful");
-}
-
-ResponseMessage handle_cancel(const RequestMessage& request, int worker_id,
-                              ResourceRecord& resource) {
-    if (!resource.is_reserved()) {
-        return make_response(request, false, resource.id, -1,
-                             "Resource is not reserved");
-    }
-    if (resource.owner_id != request.client_id) {
-        return make_response(request, false, resource.id, resource.owner_id,
-                             "Only the owner can cancel this reservation");
-    }
-
-    resource.release();
-    log_message(worker_id, request, "cancelled reservation");
-    return make_response(request, true, resource.id, -1,
-                         "Cancellation successful");
-}
-
-ResponseMessage process_request_core(const RequestMessage& request,
-                                     int worker_id) {
-    const Command command = static_cast<Command>(request.command);
-
-    switch (command) {
-        case Command::LIST:
-            return handle_list(request, worker_id);
-
-        case Command::QUIT:
-            log_message(worker_id, request, "client requested disconnect");
-            return make_response(request, true, -1, -1,
-                                 "Client disconnected");
-
+    ResourceResult result;
+    result.owner = resource.owner.load();
+    if (result.owner == NO_OWNER) trace.record("check resource: AVAILABLE");
+    else trace.record("check resource: RESERVED");
+    switch (static_cast<Command>(request.command)) {
         case Command::STATUS:
+            result.success = true;
+            break;
         case Command::RESERVE:
+            result.message = "Resource is already reserved";
+            if (result.owner != NO_OWNER) break;
+            // Keep the delay between check and update for the race experiment.
+            add_random_delay();
+            resource.owner.store(request.client_id);
+            result.owner = request.client_id;
+            result.success = true;
+            result.message = "Reservation successful";
+            break;
         case Command::CANCEL:
+            result.message = "Resource is not reserved";
+            if (result.owner == NO_OWNER) break;
+            result.message = "Only the owner can cancel this reservation";
+            if (result.owner != request.client_id) break;
+            resource.owner.store(NO_OWNER);
+            result.owner = NO_OWNER;
+            result.success = true;
+            result.message = "Cancellation successful";
+            break;
+        default:
+            result.message = "Unknown command";
             break;
     }
-
-    if (!valid_resource_id(request.resource_id)) {
-        log_message(worker_id, request, "invalid resource id");
-        std::ostringstream error_message;
-        error_message << "Resource ID must be between 1 and "
-                      << RESOURCE_COUNT;
-        return make_response(request, false, request.resource_id, -1,
-                             error_message.str());
-    }
-
-    ResourceRecord& resource = resource_at(request.resource_id);
-    switch (command) {
-        case Command::STATUS:
-            return handle_status(request, worker_id, resource);
-        case Command::RESERVE:
-            return handle_reserve(request, worker_id, resource);
-        case Command::CANCEL:
-            return handle_cancel(request, worker_id, resource);
-        default:
-            return make_response(request, false, -1, -1,
-                                 "Unknown command");
-    }
+    return result;
 }
 
-ResponseMessage process_request(const RequestMessage& request, int worker_id) {
-    if (!synchronization_enabled) {
-        return process_request_core(request, worker_id);
+ResponseMessage process_request(const RequestMessage& request, RequestTrace& trace) {
+    const auto command = static_cast<Command>(request.command);
+    if (request.client_id <= 0)
+        return make_response(request, false, NO_OWNER, "Client ID must be positive");
+    if (command == Command::LIST) return handle_list(request, trace);
+    if (command == Command::QUIT)
+        return make_response(request, true, NO_OWNER, "Client disconnected");
+    if (!command_requires_resource(command))
+        return make_response(request, false, NO_OWNER, "Unknown command");
+    if (!valid_resource_id(request.resource_id))
+        return make_response(request, false, NO_OWNER,
+                             "Resource ID must be between 1 and " +
+                             std::to_string(RESOURCE_COUNT));
+
+    const auto result = update_resource(request, trace);
+    if (command == Command::STATUS) {
+        std::ostringstream output;
+        output << "Resource " << request.resource_id << ": ";
+        if (result.owner == NO_OWNER) output << "AVAILABLE";
+        else output << "RESERVED, owner=Client-" << result.owner;
+        return make_response(request, true, result.owner, output.str());
     }
-
-    const Command command = static_cast<Command>(request.command);
-
-    if (command == Command::LIST) {
-        std::array<std::unique_lock<std::mutex>, RESOURCE_COUNT> guards;
-        for (std::size_t index = 0; index < resource_mutexes.size(); ++index) {
-            guards[index] = std::unique_lock<std::mutex>(resource_mutexes[index]);
-        }
-
-        log_message(worker_id, request, "entering critical section");
-        ResponseMessage response = process_request_core(request, worker_id);
-        log_message(worker_id, request, "leaving critical section");
-        return response;
-    }
-
-    if (!command_requires_resource(command) ||
-        !valid_resource_id(request.resource_id)) {
-        return process_request_core(request, worker_id);
-    }
-
-    std::lock_guard<std::mutex> guard(
-        resource_mutexes[static_cast<std::size_t>(request.resource_id - 1)]);
-    log_message(worker_id, request, "entering critical section");
-    ResponseMessage response = process_request_core(request, worker_id);
-    log_message(worker_id, request, "leaving critical section");
-    return response;
+    return make_response(request, result.success, result.owner, result.message);
 }
 
-void send_response(const RequestMessage& request,
-                   const ResponseMessage& response) {
-    mqd_t response_queue = mq_open(request.reply_queue, O_WRONLY);
-    if (response_queue == static_cast<mqd_t>(-1)) {
-        std::lock_guard<std::mutex> guard(log_mutex);
-        std::cerr << "mq_open response queue failed for "
-                  << request.reply_queue << ": "
-                  << std::strerror(errno) << '\n';
+void report_queue_error(const char* operation, int error) {
+    std::lock_guard<std::mutex> guard(log_mutex);
+    std::cerr << operation << ": " << std::strerror(error) << '\n';
+}
+
+void send_response(const RequestMessage& request, const ResponseMessage& response) {
+    MessageQueue queue;
+    if (!queue.open(request.reply_queue, O_WRONLY)) {
+        report_queue_error("Cannot open response queue", errno);
         return;
     }
-
-    const timespec deadline =
-        deadline_after_seconds(REQUEST_TIMEOUT_SECONDS);
-    if (mq_timedsend(response_queue,
-                     reinterpret_cast<const char*>(&response),
-                     sizeof(response), 0, &deadline) == -1) {
-        std::lock_guard<std::mutex> guard(log_mutex);
-        std::cerr << "mq_send response failed: "
-                  << std::strerror(errno) << '\n';
-    }
-
-    mq_close(response_queue);
+    const auto deadline = deadline_after_seconds(REQUEST_TIMEOUT_SECONDS);
+    int sent;
+    do {
+        sent = mq_timedsend(queue.descriptor(),
+                            reinterpret_cast<const char*>(&response),
+                            sizeof(response), 0, &deadline);
+    } while (sent == -1 && errno == EINTR && !stop_requested);
+    if (sent == -1) report_queue_error("Cannot send response", errno);
 }
 
 void worker_loop(int worker_id, mqd_t request_queue) {
-    while (running.load()) {
+    while (!stop_requested) {
         RequestMessage request = {};
-        struct timespec deadline;
-        clock_gettime(CLOCK_REALTIME, &deadline);
-        deadline.tv_sec += 1;
-
-        const ssize_t received = mq_timedreceive(
-            request_queue,
-            reinterpret_cast<char*>(&request),
-            sizeof(request),
-            0,
-            &deadline);
-
+        const auto deadline = deadline_after_seconds(1);
+        const auto received = mq_timedreceive(
+            request_queue, reinterpret_cast<char*>(&request),
+            sizeof(request), nullptr, &deadline);
         if (received == -1) {
-            if (errno == ETIMEDOUT || errno == EINTR) {
-                continue;
-            }
-            if (!running.load()) {
-                break;
-            }
-            std::lock_guard<std::mutex> guard(log_mutex);
-            std::cerr << "Worker-" << worker_id
-                      << " mq_receive failed: "
-                      << std::strerror(errno) << '\n';
+            const int error = errno;
+            if (error == ETIMEDOUT || error == EINTR) continue;
+            report_queue_error("Cannot receive request", error);
+            return;
+        }
+        if (received != static_cast<ssize_t>(sizeof(request)) ||
+            request.reply_queue[0] != '/' ||
+            std::memchr(request.reply_queue, '\0', sizeof(request.reply_queue)) == nullptr) {
+            report_queue_error("Malformed request", EPROTO);
             continue;
         }
-
-        if (received != static_cast<ssize_t>(sizeof(request))) {
-            log_message(worker_id, request, "received malformed message");
-            continue;
-        }
-
-        log_message(worker_id, request, "received request");
-        const ResponseMessage response = process_request(request, worker_id);
+        RequestTrace trace;
+        trace.record("received request");
+        const auto response = process_request(request, trace);
+        // No resource locks are held while waiting for console output.
+        trace.record(response.text);
+        trace.print(worker_id, request);
         send_response(request, response);
     }
-
 }
 
 bool parse_bool_value(const std::string& value, bool& result) {
@@ -305,97 +286,65 @@ bool parse_bool_value(const std::string& value, bool& result) {
     return false;
 }
 
-int main(int argc, char** argv) {
-    int worker_count = 3;
-
+bool parse_options(int argc, char** argv) {
     for (int index = 1; index < argc; ++index) {
         const std::string argument(argv[index]);
-
-        if (argument == "--workers" && index + 1 < argc) {
-            int parsed_workers = 0;
-            if (!parse_integer(argv[++index], parsed_workers)) {
-                std::cerr << "Invalid --workers value\n";
-                return 1;
-            }
-            worker_count = std::max(1, parsed_workers);
-        } else if (argument == "--sync" && index + 1 < argc) {
-            if (!parse_bool_value(argv[++index], synchronization_enabled)) {
-                std::cerr << "Invalid --sync value\n";
-                return 1;
-            }
-        } else if (argument == "--delay" && index + 1 < argc) {
-            if (!parse_bool_value(argv[++index], random_delay_enabled)) {
-                std::cerr << "Invalid --delay value\n";
-                return 1;
-            }
+        if (index + 1 >= argc) return false;
+        const std::string value(argv[++index]);
+        if (argument == "--workers") {
+            if (!parse_integer(value, options.workers) || options.workers <= 0)
+                return false;
+        } else if (argument == "--sync") {
+            if (!parse_bool_value(value, options.synchronize)) return false;
+        } else if (argument == "--delay") {
+            if (!parse_bool_value(value, options.delay)) return false;
+        } else if (argument == "--verbose") {
+            if (!parse_bool_value(value, options.verbose)) return false;
         } else {
-            std::cerr << "Usage: " << argv[0]
-                      << " [--workers N] [--sync on|off] [--delay on|off]"
-                      << '\n';
-            return 1;
+            return false;
         }
     }
+    return true;
+}
 
-    resources.reserve(RESOURCE_COUNT);
-    for (int id = 1; id <= RESOURCE_COUNT; ++id) {
-        ResourceRecord resource = {};
-        resource.id = id;
-        resource.owner_id = -1;
-        resources.push_back(resource);
-    }
+} // namespace
 
-    struct mq_attr attributes = {};
-    attributes.mq_maxmsg = QUEUE_MAX_MESSAGES;
-    attributes.mq_msgsize = sizeof(RequestMessage);
-
-    mq_unlink(REQUEST_QUEUE_NAME);
-    mqd_t request_queue = mq_open(
-        REQUEST_QUEUE_NAME,
-        O_CREAT | O_RDONLY,
-        0666,
-        &attributes);
-
-    if (request_queue == static_cast<mqd_t>(-1)) {
-        std::cerr << "Cannot create request queue: "
-                  << std::strerror(errno) << '\n';
+int main(int argc, char** argv) {
+    if (!parse_options(argc, argv)) {
+        std::cerr << "Usage: " << argv[0]
+                  << " [--workers N] [--sync on|off] [--delay on|off]"
+                     " [--verbose on|off]\n";
         return 1;
     }
 
+    MessageQueue request_queue;
+    if (!request_queue.create(REQUEST_QUEUE_NAME, O_RDONLY, QUEUE_MAX_MESSAGES,
+                              sizeof(RequestMessage), 0666)) {
+        std::cerr << "Cannot create request queue: " << std::strerror(errno)
+                  << ". Check whether another server is running or a stale queue remains.\n";
+        return 1;
+    }
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
-
-    const char* sync_status = "off";
-    if (synchronization_enabled) {
-        sync_status = "on";
-    }
-
-    const char* delay_status = "off";
-    if (random_delay_enabled) {
-        delay_status = "on";
-    }
-
-    std::cout << "Server started: workers=" << worker_count
-              << ", sync=" << sync_status
-              << ", random_delay=" << delay_status
-              << '\n';
-    std::cout << "Request queue: " << REQUEST_QUEUE_NAME << '\n';
+    std::cout << "Server started: workers=" << options.workers
+              << ", sync=" << on_off(options.synchronize)
+              << ", random_delay=" << on_off(options.delay)
+              << ", verbose=" << on_off(options.verbose) << '\n'
+              << "Request queue: " << REQUEST_QUEUE_NAME << std::endl;
 
     std::vector<std::thread> workers;
-    workers.reserve(static_cast<std::size_t>(worker_count));
-    for (int id = 1; id <= worker_count; ++id) {
-        workers.push_back(std::thread(worker_loop, id, request_queue));
+    try {
+        workers.reserve(static_cast<std::size_t>(options.workers));
+        for (int id = 0; id < options.workers; ++id)
+            workers.emplace_back(worker_loop, id + 1, request_queue.descriptor());
+    } catch (const std::exception& error) {
+        stop_requested.store(true);
+        for (auto& worker : workers) worker.join();
+        std::cerr << "Cannot start workers: " << error.what() << '\n';
+        return 1;
     }
-
-    while (running.load()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    }
-
-    for (std::size_t index = 0; index < workers.size(); ++index) {
-        workers[index].join();
-    }
-
-    mq_close(request_queue);
-    mq_unlink(REQUEST_QUEUE_NAME);
-    std::cout << "Server stopped and request queue removed" << '\n';
+    for (auto& worker : workers) worker.join();
+    request_queue.close();
+    std::cout << "Server stopped and request queue removed\n";
     return 0;
 }
