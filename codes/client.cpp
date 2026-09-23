@@ -2,12 +2,14 @@
 
 #include <iostream>
 
+// ตัวเลือกการทำงานของ Client รวมถึงคำสั่งที่รับมาในโหมด --once
 struct ClientOptions {
     int client_id = static_cast<int>(getpid());
     bool once = false;
     ParsedCommand command;
 };
 
+// แยกวิเคราะห์ตัวเลือก Command Line ของ Client
 bool parse_options(int argc, char** argv, ClientOptions& options) {
     for (int index = 1; index < argc; ++index) {
         const std::string argument(argv[index]);
@@ -26,6 +28,7 @@ bool parse_options(int argc, char** argv, ClientOptions& options) {
     return true;
 }
 
+// ส่งคำสั่งไปยัง Server และแสดงผลลัพธ์บน Terminal
 RequestResult execute(ClientConnection& connection, const ParsedCommand& command) {
     const auto result = connection.send(command.command, command.resource_id);
     if (!result.received_response()) {
@@ -38,6 +41,7 @@ RequestResult execute(ClientConnection& connection, const ParsedCommand& command
     return result;
 }
 
+// จุดเริ่มต้นของ Client: เชื่อมต่อ Server และรับคำสั่งจากผู้ใช้
 int main(int argc, char** argv) {
     ClientOptions options;
     if (!parse_options(argc, argv, options)) {
