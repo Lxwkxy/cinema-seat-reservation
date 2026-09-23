@@ -21,9 +21,8 @@ struct ServerOptions {
 
 struct ResourceState {
     std::mutex mutex;
-    // Atomic accesses keep the --sync off demonstration defined in C++.
-    // The availability check and update remain separate, so double booking
-    // is still possible without the resource mutex.
+    // ใช้ Atomic ให้โหมด --sync off ไม่เกิด Data Race ในระดับหน่วยความจำ
+    // แต่การตรวจสอบและการอัปเดตยังแยกจากกัน จึงยังเกิดการจองซ้ำได้
     std::atomic<int> owner{NO_OWNER};
 };
 
@@ -36,6 +35,7 @@ std::atomic<unsigned long long> log_sequence{0};
 static_assert(ATOMIC_BOOL_LOCK_FREE == 2, "Signal handling requires lock-free bool");
 std::atomic<bool> stop_requested{false};
 
+// รับสัญญาณหยุดการทำงานและแจ้งให้ Worker ทุกตัวจบ Loop อย่างปลอดภัย
 void handle_signal(int) {
     stop_requested.store(true);
 }
@@ -48,6 +48,7 @@ struct LogEvent {
 
 class RequestTrace {
 public:
+    // บันทึกเหตุการณ์ของ Request เมื่อเปิดโหมด Verbose
     void record(const char* message) {
         if (!options.verbose) return;
         auto& event = events_[count_++];
@@ -57,6 +58,7 @@ public:
         event.message = message;
     }
 
+    // พิมพ์เหตุการณ์ทั้งหมดพร้อมข้อมูล Worker, Client และ Resource
     void print(int worker_id, const RequestMessage& request) const {
         if (!options.verbose) return;
         std::lock_guard<std::mutex> guard(log_mutex);
@@ -78,17 +80,19 @@ public:
     }
 
 private:
-    // Each request records at most five events; no allocation under a resource lock.
+    // แต่ละ Request บันทึกได้ไม่เกิน 5 เหตุการณ์ และไม่จัดสรรหน่วยความจำขณะถือ Lock
     std::array<LogEvent, 5> events_;
     std::size_t count_ = 0;
 };
 
 class CriticalSectionLog {
 public:
+    // เริ่มติดตาม Critical Section และบันทึกเหตุการณ์เมื่อมีการ Lock
     CriticalSectionLog(RequestTrace& trace, bool locked)
         : trace_(trace), locked_(locked) {
         if (locked_) trace_.record("entering critical section");
     }
+    // บันทึกการออกจาก Critical Section ก่อนปล่อย Scope
     ~CriticalSectionLog() {
         if (locked_) trace_.record("leaving critical section");
     }
@@ -100,6 +104,7 @@ private:
     bool locked_;
 };
 
+// หน่วงเวลาแบบสุ่มเพื่อเพิ่มโอกาสให้เกิด Race Condition ในการทดลอง
 void add_random_delay() {
     if (!options.delay) return;
     static thread_local std::mt19937 generator(std::random_device{}());
@@ -108,6 +113,7 @@ void add_random_delay() {
     std::this_thread::sleep_for(std::chrono::milliseconds(distribution(generator)));
 }
 
+// สร้าง Response จากผลการประมวลผลของ Request
 ResponseMessage make_response(const RequestMessage& request, bool success,
                               int owner_id, const std::string& text) {
     ResponseMessage response = {};
@@ -120,14 +126,15 @@ ResponseMessage make_response(const RequestMessage& request, bool success,
     return response;
 }
 
+// คัดลอกสถานะ Resource ทั้งหมดเป็น Snapshot ที่สอดคล้องกัน
 ResourceSnapshot snapshot_resources(RequestTrace& trace) {
-    // Acquire locks in ascending order for a consistent snapshot.
+    // Lock Resource ตามลำดับ ID เพื่อให้ Snapshot มีสถานะสอดคล้องกัน
     std::array<std::unique_lock<std::mutex>, RESOURCE_COUNT> guards;
     if (options.synchronize) {
         for (std::size_t index = 0; index < resources.size(); ++index)
             guards[index] = std::unique_lock<std::mutex>(resources[index].mutex);
     }
-    // Construct after the guards so the exit event is captured before unlocking.
+    // สร้างตัวติดตามหลัง Guard เพื่อบันทึกการออกจาก Critical Section ก่อนปล่อย Lock
     CriticalSectionLog critical_section(trace, options.synchronize);
     ResourceSnapshot snapshot = {};
     for (std::size_t index = 0; index < resources.size(); ++index) {
@@ -137,9 +144,10 @@ ResourceSnapshot snapshot_resources(RequestTrace& trace) {
     return snapshot;
 }
 
+// ประมวลผลคำสั่ง LIST และสร้างข้อความสถานะของทุก Resource
 ResponseMessage handle_list(const RequestMessage& request, RequestTrace& trace) {
     const auto snapshot = snapshot_resources(trace);
-    // Formatting happens after all resource locks have been released.
+    // จัดรูปแบบข้อความหลังจากปล่อย Lock ของ Resource ทั้งหมดแล้ว
     std::ostringstream output;
     for (const auto& resource : snapshot) {
         if (resource.id > 1) output << ' ';
@@ -158,6 +166,7 @@ struct ResourceResult {
     const char* message = "";
 };
 
+// ประมวลผล STATUS, RESERVE และ CANCEL ของ Resource ที่ระบุ
 ResourceResult update_resource(const RequestMessage& request, RequestTrace& trace) {
     auto& resource = resources[static_cast<std::size_t>(request.resource_id - 1)];
     std::unique_lock<std::mutex> guard(resource.mutex, std::defer_lock);
@@ -175,7 +184,7 @@ ResourceResult update_resource(const RequestMessage& request, RequestTrace& trac
         case Command::RESERVE:
             result.message = "Resource is already reserved";
             if (result.owner != NO_OWNER) break;
-            // Keep the delay between check and update for the race experiment.
+            // คง Delay ระหว่างการตรวจสอบกับการอัปเดตไว้สำหรับการทดลอง Race Condition
             add_random_delay();
             resource.owner.store(request.client_id);
             result.owner = request.client_id;
@@ -199,6 +208,7 @@ ResourceResult update_resource(const RequestMessage& request, RequestTrace& trac
     return result;
 }
 
+// ตรวจสอบ Request และเลือก Handler ที่ตรงกับคำสั่ง
 ResponseMessage process_request(const RequestMessage& request, RequestTrace& trace) {
     const auto command = static_cast<Command>(request.command);
     if (request.client_id <= 0)
@@ -224,11 +234,13 @@ ResponseMessage process_request(const RequestMessage& request, RequestTrace& tra
     return make_response(request, result.success, result.owner, result.message);
 }
 
+// พิมพ์ข้อผิดพลาดของ Message Queue โดยป้องกัน Log จากหลาย Worker ชนกัน
 void report_queue_error(const char* operation, int error) {
     std::lock_guard<std::mutex> guard(log_mutex);
     std::cerr << operation << ": " << std::strerror(error) << '\n';
 }
 
+// ส่ง Response กลับไปยัง Queue ของ Client เจ้าของ Request
 void send_response(const RequestMessage& request, const ResponseMessage& response) {
     MessageQueue queue;
     if (!queue.open(request.reply_queue, O_WRONLY)) {
@@ -245,6 +257,7 @@ void send_response(const RequestMessage& request, const ResponseMessage& respons
     if (sent == -1) report_queue_error("Cannot send response", errno);
 }
 
+// Loop หลักของ Worker สำหรับรับและประมวลผล Request จาก Queue ร่วม
 void worker_loop(int worker_id, mqd_t request_queue) {
     while (!stop_requested) {
         RequestMessage request = {};
@@ -267,13 +280,14 @@ void worker_loop(int worker_id, mqd_t request_queue) {
         RequestTrace trace;
         trace.record("received request");
         const auto response = process_request(request, trace);
-        // No resource locks are held while waiting for console output.
+        // ไม่ถือ Resource Lock ระหว่างรอการพิมพ์ Log ลง Console
         trace.record(response.text);
         trace.print(worker_id, request);
         send_response(request, response);
     }
 }
 
+// แปลงค่าตัวเลือก on/off, true/false หรือ 1/0 ให้เป็น Boolean
 bool parse_bool_value(const std::string& value, bool& result) {
     if (value == "on" || value == "true" || value == "1") {
         result = true;
@@ -286,6 +300,7 @@ bool parse_bool_value(const std::string& value, bool& result) {
     return false;
 }
 
+// แยกวิเคราะห์ตัวเลือก Command Line ของ Server
 bool parse_options(int argc, char** argv) {
     for (int index = 1; index < argc; ++index) {
         const std::string argument(argv[index]);
@@ -307,8 +322,9 @@ bool parse_options(int argc, char** argv) {
     return true;
 }
 
-} // namespace
+} // จบ Anonymous Namespace
 
+// จุดเริ่มต้นของ Server: สร้าง Queue, เริ่ม Worker และ Cleanup เมื่อจบงาน
 int main(int argc, char** argv) {
     if (!parse_options(argc, argv)) {
         std::cerr << "Usage: " << argv[0]

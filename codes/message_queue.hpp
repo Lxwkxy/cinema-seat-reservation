@@ -7,20 +7,24 @@
 #include <mqueue.h>
 #include <unistd.h>
 
-// Only the object that creates a queue owns its name and may unlink it.
+// เฉพาะ Object ที่สร้าง Queue เท่านั้นที่มีสิทธิ์ลบชื่อ Queue ออกจากระบบ
 class MessageQueue {
 public:
+    // สร้าง Wrapper ที่ยังไม่ได้เปิด Message Queue
     MessageQueue() = default;
     MessageQueue(const MessageQueue&) = delete;
     MessageQueue& operator=(const MessageQueue&) = delete;
+    // ปิด Descriptor และลบ Queue ที่ Object นี้เป็นเจ้าของ
     ~MessageQueue() { close(); }
 
+    // เปิด Queue ที่มีอยู่แล้วด้วย Flag ที่กำหนด
     bool open(const std::string& name, int flags) {
         close();
         descriptor_ = mq_open(name.c_str(), flags);
         return descriptor_ != invalid_descriptor();
     }
 
+    // สร้าง Queue ใหม่และบันทึกชื่อไว้เพื่อ Cleanup ภายหลัง
     bool create(const std::string& name, int flags, long capacity,
                 long message_size, mode_t permissions = 0600) {
         close();
@@ -37,6 +41,7 @@ public:
         return true;
     }
 
+    // ปิด Descriptor และ Unlink ชื่อ Queue ที่ Object นี้สร้างไว้
     void close() {
         if (descriptor_ != invalid_descriptor()) {
             mq_close(descriptor_);
@@ -48,21 +53,26 @@ public:
         }
     }
 
+    // คืนค่า Descriptor สำหรับใช้กับฟังก์ชัน POSIX Message Queue
     mqd_t descriptor() const { return descriptor_; }
 
 private:
+    // คืนค่า Descriptor ที่ใช้แทนสถานะเปิดไม่สำเร็จ
     static mqd_t invalid_descriptor() { return static_cast<mqd_t>(-1); }
     mqd_t descriptor_ = invalid_descriptor();
     std::string owned_name_;
 };
 
+// แยกผลการจองที่ตอบกลับแล้วออกจาก Timeout และข้อผิดพลาดการสื่อสาร
 enum class RequestOutcome { Succeeded, Rejected, Timeout, TransportError };
 
+// ผลการส่ง Request พร้อม Response หรือรหัส Error สำหรับกรณีสื่อสารไม่สำเร็จ
 struct RequestResult {
     RequestOutcome outcome = RequestOutcome::TransportError;
     ResponseMessage response = {};
     int error_number = 0;
 
+    // ตรวจสอบว่าได้รับ Response ที่สำเร็จหรือถูกปฏิเสธจาก Server แล้วหรือไม่
     bool received_response() const {
         return outcome == RequestOutcome::Succeeded ||
                outcome == RequestOutcome::Rejected;
@@ -71,6 +81,7 @@ struct RequestResult {
 
 class ClientConnection {
 public:
+    // สร้าง Response Queue ของ Client แล้วเปิด Request Queue ของ Server
     bool open(int client_id, const std::string& prefix) {
         ready_ = false;
         request_queue_.close();
@@ -95,6 +106,7 @@ public:
         return true;
     }
 
+    // ส่ง Request และรอ Response ภายในเวลาที่กำหนด
     RequestResult send(Command command, int resource_id) {
         if (!ready_) return fail(ENOTCONN);
         RequestMessage request = {};
@@ -103,7 +115,7 @@ public:
         request.resource_id = resource_id;
         copy_text(request.reply_queue, sizeof(request.reply_queue), response_name_);
 
-        // One deadline bounds the complete round trip, including EINTR retries.
+        // ใช้ Deadline เดียวครอบคลุมทั้งการส่งและรับ รวมถึงการลองใหม่เมื่อถูก EINTR
         const auto deadline = deadline_after_seconds(REQUEST_TIMEOUT_SECONDS);
         int sent;
         do {
@@ -134,8 +146,9 @@ public:
     }
 
 private:
+    // สร้างผลลัพธ์ Error และปิด Connection เพื่อป้องกัน Late Reply
     RequestResult fail(int error) {
-        // A late reply must never be consumed by a subsequent request.
+        // ป้องกันไม่ให้ Response ที่มาช้าถูกนำไปจับคู่กับ Request ถัดไป
         ready_ = false;
         RequestResult result;
         result.error_number = error;
