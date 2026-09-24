@@ -1,63 +1,71 @@
-# Cinema Seat Reservation System: Architecture
+# สถาปัตยกรรม Cinema Seat Reservation System
 
 เอกสารนี้อธิบายโครงสร้างและการทำงานภายในของระบบจองที่นั่งโรงภาพยนตร์
 รายละเอียดการ Build และการทดลองอยู่ใน [README.md](../README.md)
 
-## 1. ขอบเขตระบบ
+## 1. ภาพรวมสั้น ๆ
 
-ระบบนี้เป็นโปรเจกต์ Operating Systems ที่สาธิตการทำงานของ:
+ระบบนี้เขียนด้วย C++11 และจำลองการจอง Resource 20 รายการบน Linux ใน Docker:
 
-- C++11 บน Linux ภายใน Docker
-- POSIX Named Message Queue สำหรับสื่อสารระหว่าง Process
-- Worker Threads สำหรับประมวลผล Client หลายตัวพร้อมกัน
-- Reservation State ในหน่วยความจำของ Server สำหรับ Resource จำนวน 20 รายการ
-- Atomic Owner และ Mutex แยกต่อ Resource เพื่อประสานงานระหว่าง Worker Threads
+1. Client ส่งคำขอผ่าน POSIX Message Queue ไปยัง Server
+2. Worker Threads ใน Server รับคำขอและจัดการ Resource ร่วมกัน
+3. เมื่อเปิด `--sync on` Mutex จะป้องกัน Worker หลายตัวแก้ Resource เดียวกันพร้อมกัน
 
-ระบบเก็บข้อมูลการจองไว้ในหน่วยความจำของ Server เท่านั้น ไม่มีฐานข้อมูลถาวร
-เมื่อ Server หยุดทำงาน ข้อมูลการจองจะถูกล้าง
+สถานะการจองอยู่ในหน่วยความจำของ Server เท่านั้น ไม่มีฐานข้อมูลถาวร
+เมื่อ Server หยุดทำงาน สถานะการจองจะถูกล้าง
+
+คำศัพท์หลักในเอกสารนี้:
+
+| คำ | ความหมาย |
+|---|---|
+| Resource | รายการที่ให้จอง ใช้แทนที่นั่งในตัวอย่างนี้ มีหมายเลข 1–20 |
+| Client | โปรแกรมที่ส่งคำสั่งไปยัง Server |
+| Worker | ตัวทำงานใน Server ที่รับคำขอแล้วประมวลผล |
+| Logical Client | Client จำลองใน Load Client; แต่ละตัวทำงานเป็น Thread ในโปรแกรมเดียวกัน |
+| Owner | Client ID ของผู้ที่จอง Resource อยู่; `-1` หมายถึงยังว่าง |
+| Mutex | ตัวล็อกแยกแต่ละ Resource; เมื่อเปิด `--sync on` จะกัน Worker อื่นจัดการ Resource เดียวกันพร้อมกัน |
 
 ## 2. ภาพรวมสถาปัตยกรรม
 
 ```mermaid
 flowchart LR
-    C1[Interactive Client]
-    C2[Client Load Test]
-    R[(POSIX Request Queue<br/>/osproj_requests)]
+    C1[Interactive Client<br/>ผู้ใช้สั่งผ่าน Terminal]
+    C2[Load Client<br/>สร้าง Client จำลอง]
+    R[(Request Queue<br/>คิวคำขอร่วม /osproj_requests)]
     W[Worker Pool<br/>Worker 1 • Worker 2 • Worker N]
-    D[(Server In-memory State<br/>20 Resources<br/>Atomic owner per Resource)]
-    M{{Per-resource Mutexes<br/>used when --sync on}}
+    D[(สถานะในหน่วยความจำ Server<br/>20 Resources<br/>Atomic owner ต่อ Resource)]
+    M{{Mutex แยกตาม Resource<br/>ใช้เมื่อ --sync on}}
 
-    subgraph RESPONSES[Response Queues]
+    subgraph RESPONSES[คิวตอบกลับ]
         direction TB
-        Q1[(Interactive Client Response Queue)]
-        Q2[(One Load Response Queue per Logical Client)]
+        Q1[(คิวตอบกลับของ Interactive Client)]
+        Q2[(หนึ่งคิวต่อ Load Logical Client)]
     end
 
-    O1[Response to Interactive Client]
-    O2[Response to Load Test Client]
+    O1[ส่งคำตอบกลับ Interactive Client]
+    O2[ส่งคำตอบกลับ Load Client]
 
-    C1 -->|Request| R
-    C2 -->|Request| R
-    R -->|workers receive from the shared queue| W
-    W -->|Read / Update| D
-    M -. protects Resource operations when enabled .-> D
-    W -->|Response| Q1
-    W -->|Response| Q2
+    C1 -->|คำขอ| R
+    C2 -->|คำขอ| R
+    R -->|Worker รับจากคิวร่วม| W
+    W -->|อ่านหรือแก้ไข| D
+    M -. ป้องกันการแก้ Resource พร้อมกัน .-> D
+    W -->|คำตอบ| Q1
+    W -->|คำตอบ| Q2
     Q1 --> O1
     Q2 --> O2
 ```
 
-Client ทั้งสองประเภทส่ง Request เข้า Queue เดียวกัน Worker แต่ละตัวรอรับ Request
-จาก Queue นี้โดยตรง จึงไม่มี Dispatcher แยกต่างหาก Load Client สร้าง Logical Client
-เป็น Threads ภายใน Process ของตัวเอง แต่ละ Logical Client มี Response Queue ของตัวเอง
+Client ทั้งสองประเภทส่ง Request เข้า Queue เดียวกัน Worker ทุกตัวรอรับจาก Queue นี้โดยตรง
+จึงไม่มี Dispatcher แยกต่างหาก
 
-Reservation State อยู่ใน Address Space ของ Server และใช้ร่วมกันระหว่าง Worker Threads
-Client Processes ไม่ได้เข้าถึง State โดยตรง แต่สื่อสารกับ Server ผ่าน Message Queue
-เมื่อเปิด `--sync on` Mutex ของ Resource ที่เกี่ยวข้องจะป้องกันการทำงานกับ State นั้น
+Load Client สร้าง Logical Client หลายตัวเป็น Threads ใน Process เดียวกัน
+แต่ละ Logical Client มี Response Queue ของตัวเอง
+Client สื่อสารกับ Server ผ่าน Message Queue และไม่เข้าถึงสถานะการจองโดยตรง
 
 ## 3. องค์ประกอบหลัก
 
-### Server
+### Server (ตัวจัดการระบบจอง)
 
 ไฟล์ `codes/server.cpp` ทำหน้าที่:
 
@@ -69,47 +77,47 @@ Client Processes ไม่ได้เข้าถึง State โดยตร�
 
 ตัวเลือกสำคัญ:
 
-| Option | หน้าที่ |
+| ตัวเลือก | หน้าที่ |
 |---|---|
 | `--workers N` | จำนวน Worker Threads |
 | `--sync on\|off` | เปิดหรือปิด Resource Mutex |
-| `--delay on\|off` | เปิดหรือปิด Random Delay 50–500 ms |
+| `--delay on\|off` | สุ่มหน่วง 50–500 ms เฉพาะ `RESERVE` เมื่อ Resource ยังว่าง |
 | `--verbose on\|off` | เปิดหรือปิดรายละเอียด Server Log |
 
-### Interactive Client
+### Interactive Client (Client ใช้งานผ่าน Terminal)
 
 ไฟล์ `codes/client.cpp` เป็น Client สำหรับการใช้งานผ่าน Terminal
 ผู้ใช้สามารถส่ง `LIST`, `STATUS`, `RESERVE`, `CANCEL` และ `QUIT`
 หรือใช้โหมด `--once` เพื่อส่งคำสั่งเดียวแล้วจบการทำงาน
 
-### Load Client
+### Load Client (Client จำลองสำหรับ Load Test)
 
 ไฟล์ `codes/client_load.cpp` สร้าง Logical Clients เป็น Threads ภายใน Process เดียวกัน
 แต่ละ Logical Client เปิด Response Queue ของตัวเองและส่ง Request หลายรายการ
 ใช้สำหรับ Sequential Baseline, Race Condition และ Load Test
 
-### Shared Headers
+### ไฟล์ Header ที่ใช้ร่วมกัน
 
 - `codes/common.hpp` — ค่าคงที่, Command, Request/Response Message และ Resource Model
 - `codes/message_queue.hpp` — Wrapper สำหรับเปิด, สร้าง, ส่ง, รับ และ cleanup POSIX Message Queue
 
-## 4. Request และ Response Flow
+## 4. เส้นทางคำขอและคำตอบ
 
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant R as /osproj_requests
+    participant R as Request Queue
     participant W as Worker
-    participant D as Reservation Data
-    participant Q as Client Response Queue
+    participant D as สถานะการจอง
+    participant Q as Response Queue ของ Client
 
-    C->>C: Create response queue
-    C->>R: Send Request + reply_queue name
-    W->>R: Receive Request
-    W->>D: Read or update resource
-    D-->>W: Result
-    W->>Q: Send Response
-    Q-->>C: Receive Response
+    C->>C: สร้าง Response Queue
+    C->>R: ส่ง Request พร้อมชื่อ Queue สำหรับตอบกลับ
+    W->>R: รับ Request
+    W->>D: อ่านหรือแก้สถานะ Resource
+    D-->>W: ส่งผลการทำงาน
+    W->>Q: ส่ง Response
+    Q-->>C: รับ Response
 ```
 
 ลำดับการทำงานมีดังนี้:
@@ -122,9 +130,9 @@ sequenceDiagram
 6. Client รอ Response ก่อนส่งคำสั่งถัดไป; Load Client ทำแบบนี้แยกกันในแต่ละ Logical Client
 
 Client ใช้ Deadline เดียว 5 วินาทีครอบคลุมทั้งการส่ง Request เข้า Queue และการรอ Response
-หากหมด Deadline ก่อนรับ Response จะนับเป็น Timeout
+หากหมดเวลาก่อนรับ Response จะนับเป็น Timeout ซึ่งไม่ได้ยืนยันว่า Server ไม่ได้ประมวลผล Request
 
-## 5. Message Queue Design
+## 5. การออกแบบ Message Queue
 
 ### Queue ที่ใช้
 
@@ -137,7 +145,7 @@ Client ใช้ Deadline เดียว 5 วินาทีครอบคล
 Response Queue แยกตาม Process และ Client ID เพื่อให้ Worker ส่งคำตอบกลับถูก Client
 ทุก Request ใช้ priority 0 และ Request Queue รองรับได้สูงสุด 10 ข้อความตามค่าที่กำหนดในโค้ด
 
-### Request Message
+### ข้อมูลคำขอ (Request)
 
 ประกาศใน `codes/common.hpp` และส่งเป็นโครงสร้าง binary ระหว่าง Client กับ Server
 
@@ -148,7 +156,7 @@ Response Queue แยกตาม Process และ Client ID เพื่อใ
 | `resource_id` | Resource หมายเลข 1–20; `LIST` และ `QUIT` ใช้ `-1` |
 | `reply_queue` | ชื่อ Queue สำหรับส่ง Response กลับ |
 
-### Response Message
+### ข้อมูลตอบกลับ (Response)
 
 | Field | ความหมาย |
 |---|---|
@@ -159,7 +167,10 @@ Response Queue แยกตาม Process และ Client ID เพื่อใ
 | `owner_id` | เจ้าของ Resource หรือ `-1` เมื่อไม่มีเจ้าของ |
 | `text` | ข้อความผลลัพธ์สำหรับแสดงให้ผู้ใช้เห็น |
 
-## 6. Reservation Data และ Critical Section
+## 6. สถานะการจองและ Critical Section
+
+Critical Section คือช่วงที่ Worker อ่านหรือแก้สถานะการจองที่ใช้ร่วมกัน
+เมื่อเปิด `--sync on` Mutex จะกัน Worker อื่นเข้าจัดการ Resource เดียวกันในช่วงนั้น
 
 Resource State ทั้ง 20 รายการอยู่ใน Server Process แต่ละรายการประกอบด้วย Atomic Owner
 และ `std::mutex` ของตัวเอง:
@@ -170,7 +181,7 @@ Owner ID:    -1 เมื่อว่าง หรือ Client ID เมื่�
 Mutex:      หนึ่งตัวต่อ Resource ใช้เมื่อ `--sync on`
 ```
 
-การจอง Resource มีขั้นตอนสำคัญคือ:
+การจอง Resource มีขั้นตอนสำคัญดังนี้:
 
 ```text
 ตรวจสอบว่า Resource ว่าง
@@ -181,48 +192,58 @@ Random Delay 50–500 ms (เฉพาะ RESERVE ที่ Resource ยัง�
 ```
 
 เมื่อใช้ `--sync on` คำสั่ง `STATUS`, `RESERVE` และ `CANCEL` จะ Lock Mutex
-ของ Resource เป้าหมายระหว่างอ่านและดำเนินการ ส่วน `RESERVE` จึงตรวจสอบและแก้ Owner
-ภายใต้ Lock เดียวกัน ทำให้มีผู้จอง Resource นั้นสำเร็จได้เพียงรายเดียว
+ของ Resource เป้าหมายระหว่างอ่านหรือแก้สถานะ
+`RESERVE` จึงตรวจสอบและเปลี่ยน Owner ภายใต้ Lock เดียวกัน
+มี Client จอง Resource นั้นสำเร็จได้เพียงรายเดียว
 
 เมื่อใช้ `--sync off` คำสั่งเหล่านี้ไม่ Lock Mutex แต่ยังอ่านและเขียน Atomic Owner
-จึงไม่มี Data Race ระดับหน่วยความจำ การตรวจสอบ Owner กับการเขียน Owner ยังคงเป็นคนละขั้น
-และอาจเกิด Race Condition ที่ทำให้มีการจอง Resource เดียวกันสำเร็จมากกว่าหนึ่งราย
+จึงไม่มี Data Race ระดับหน่วยความจำ เพราะการอ่านและเขียน Owner เป็น Atomic
+อย่างไรก็ตาม การตรวจสอบ Owner และการเขียน Owner
+เป็นคนละขั้นตอน ตัวอย่างเช่น Worker สองตัวอาจอ่านว่า Resource ว่างพร้อมกัน
+แล้วต่างคนต่างตอบว่าจองสำเร็จ จึงเกิด Race Condition ได้
+Owner ที่เหลือใน Server จะเป็น Client ID ของ Worker ที่เขียนค่าล่าสุด
+
+เมื่อเปิด `--delay on` การหน่วงเวลาเกิดหลังตรวจพบว่า Resource ว่างและก่อนบันทึกผู้จอง
+ถ้าเปิด Sync ด้วย Worker อื่นจะรอ Mutex ระหว่างช่วงหน่วงเวลานี้
 
 สำหรับ `LIST` เมื่อใช้ `--sync on` Server จะ Lock Mutex ทั้ง 20 ตัวตามลำดับ Resource ID
 เพื่อสร้าง Snapshot ที่สอดคล้องกัน แล้วปล่อย Lock ก่อนจัดรูปแบบข้อความตอบกลับ
 เมื่อใช้ `--sync off` Server อ่าน Atomic Owner ทีละ Resource โดยไม่ Lock; ค่าแต่ละตัว
 อ่านได้อย่างปลอดภัย แต่ Snapshot รวมอาจสะท้อนสถานะคนละช่วงเวลา
 
-## 7. Concurrency Experiments
+## 7. การทดลองพร้อมกัน (Concurrency Experiments)
 
-| Experiment | Workers | Sync | Delay | จุดประสงค์ |
+| การทดลอง | จำนวน Worker | Mutex (`--sync`) | Delay (`--delay`) | จุดประสงค์ |
 |---|---:|---|---|---|
-| Sequential Baseline | 1 | On | Off | ประมวลผลทีละ Request; มีผู้จอง Resource เดียวกันสำเร็จหนึ่งราย |
-| Without Synchronization | 3 | Off | On | แสดง Race Condition |
-| With Synchronization | 3 | On | On | แสดงว่าจองสำเร็จเพียง 1 Client |
-| Load Test | 3 | On | Off | หาจุดเริ่มต้นของ Timeout หรือ Failure |
+| Sequential Baseline | 1 | on | off | ประมวลผลทีละ Request; มีผู้จอง Resource เดียวกันสำเร็จหนึ่งราย |
+| Without Synchronization | 3 | off | on | แสดง Race Condition |
+| With Synchronization | 3 | on | on | แสดงว่าจองสำเร็จเพียง 1 Client |
+| Load Test | 3 | on | off | หาจุดเริ่มต้นของ Timeout หรือ Failure |
 
-### Race Condition
+### Race Condition (การจองชนกัน)
 
 1. เปิด Server ด้วย `--workers 3 --sync off --delay on`
 2. ส่ง `RESERVE` ไปยัง Resource เดียวกันจาก Client อย่างน้อย 5 ตัว
 3. สังเกตจำนวน Client ที่ได้รับผลสำเร็จ
 
-Random Delay ที่อยู่ระหว่าง Check และ Update เพิ่มโอกาสให้ Worker หลายตัวอ่านสถานะว่างพร้อมกัน
+เมื่อปิด Sync, Random Delay ระหว่างการตรวจสอบกับการบันทึกผู้จอง
+เปิดโอกาสให้ Worker หลายตัวอ่านสถานะว่างก่อนที่ตัวใดตัวหนึ่งจะเขียน Owner
 
-### Synchronized Reservation
+### Synchronized Reservation (การจองเมื่อเปิด Mutex)
 
 1. เปิด Server ด้วย `--workers 3 --sync on --delay on`
 2. ส่ง `RESERVE` ไปยัง Resource เดิมจาก Client หลายตัว
 3. ควรมีผู้จองสำเร็จเพียง 1 Client และที่เหลือถูกปฏิเสธ
 
-## 8. Logging และ Observability
+## 8. Log และการติดตามการทำงาน
 
 เมื่อเปิด `--verbose on` Server จะแสดง Log ใน Terminal โดยแต่ละบรรทัดประกอบด้วย:
 
 ```text
-[sequence] [time] [Worker ID] [Client ID] [Command] [Resource ID] message
+[seq=78] [t=...] [Worker-1] [Client-123] [RESERVE] [Resource-10] message
 ```
+
+`seq` เป็นหมายเลขลำดับเหตุการณ์ ส่วน `t` เป็นเวลาแบบ timestamp หน่วยมิลลิวินาที
 
 Log สำคัญสำหรับการทดลองประกอบด้วย:
 
@@ -234,31 +255,33 @@ Log สำคัญสำหรับการทดลองประกอบ�
 
 Log ใช้ยืนยันว่า Worker ใดประมวลผล Request และแสดงความแตกต่างระหว่าง `--sync on`
 กับ `--sync off`; Critical Section Log จะแสดงเมื่อมีการถือ Mutex เท่านั้น
+Log อาจพิมพ์ไม่เรียงตามค่า `seq` เพราะ Worker พิมพ์เหตุการณ์หลังประมวลผล Request
+หากต้องดูตามลำดับเหตุการณ์ ให้เปรียบเทียบค่า `seq`
 ตัว Server เขียน Log ไปยัง stdout/stderr ไม่ได้บันทึกลงไฟล์เอง แต่สคริปต์ทดลองสามารถ
 Redirect output ไปเก็บเป็น Server Log ได้
 
-## 9. Lifecycle และ Cleanup
+## 9. การเริ่ม หยุด และ Cleanup
 
 ```text
-Start Server
+เริ่ม Server
     ↓
-Create /osproj_requests
+สร้าง Request Queue /osproj_requests
     ↓
-Start Worker Threads
+เริ่ม Worker Threads
     ↓
-Receive and process Requests
+รับและประมวลผล Request
     ↓
 SIGINT (Ctrl+C) หรือ SIGTERM
     ↓
-Stop Workers and remove Request Queue
+หยุด Worker และลบ Request Queue ที่ Server สร้าง
 ```
 
 `MessageQueue` จะ Unlink เฉพาะ Queue ที่ Object นั้นสร้างสำเร็จและเป็นเจ้าของ
-ดังนั้นหาก Server สร้าง `/osproj_requests` ไม่สำเร็จเพราะชื่อนี้มีอยู่แล้ว
-Server จะรายงานข้อผิดพลาดและไม่ลบ Queue เดิม Client จะลบ Response Queue ของตัวเอง
-เมื่อจบการทำงานตามปกติ ถ้า Process ถูกบังคับหยุด อาจต้องตรวจสอบ Queue ที่ค้างก่อนเริ่มใหม่
+หาก `/osproj_requests` มีอยู่ก่อน Server เริ่ม Server จะแจ้งข้อผิดพลาดและไม่ลบ Queue เดิม
+Client ลบ Response Queue ของตัวเองเมื่อจบตามปกติ
+ถ้า Process ถูกบังคับหยุด Queue อาจค้างอยู่และต้องตรวจสอบก่อนเริ่มใหม่
 
-## 10. Container and Build Architecture
+## 10. Container และสภาพแวดล้อม Build
 
 ```text
 Host Machine
@@ -276,25 +299,25 @@ Host Machine
 Compose ยัง Mount โฟลเดอร์โปรเจกต์ไปที่ `/workspace` เพื่อให้ Source Code และไฟล์ผลลัพธ์
 ใน Container ตรงกับไฟล์บน Host
 
-## 11. Source-to-Responsibility Map
+## 11. ไฟล์แต่ละส่วนทำหน้าที่อะไร
 
-| File | Responsibility |
+| ไฟล์ | หน้าที่ |
 |---|---|
-| `codes/server.cpp` | Server, Worker Threads, Reservation Logic และ Logging |
-| `codes/client.cpp` | Interactive/Once Client |
-| `codes/client_load.cpp` | Logical Clients และ Load Metrics |
-| `codes/common.hpp` | Shared Constants, Commands และ Message Structures |
-| `codes/message_queue.hpp` | POSIX Message Queue Wrapper และ Client Connection |
-| `codes/load_metrics.hpp` | สถิติ Latency, Average, P95 และ Maximum |
-| `codes/load_workload.hpp` | เลือก Resource เดียวหรือกระจายแบบ Round Robin |
-| `scripts/run_server.sh` | ช่วยเริ่ม Server |
-| `scripts/demo_clients.sh` | เปิด Client 5 processes ส่งคำสั่งต่างกันจาก Terminal เดียว |
+| `codes/server.cpp` | Server, Worker Threads, การจอง Resource และ Log |
+| `codes/client.cpp` | Client สำหรับ Terminal และคำสั่งครั้งเดียว |
+| `codes/client_load.cpp` | สร้าง Logical Clients และรวบรวม Load Metrics |
+| `codes/common.hpp` | ค่าคงที่ คำสั่ง และโครงสร้าง Request/Response ที่ใช้ร่วมกัน |
+| `codes/message_queue.hpp` | จัดการ POSIX Message Queue และการเชื่อมต่อของ Client |
+| `codes/load_metrics.hpp` | คำนวณ Latency, Average, P95 และ Maximum |
+| `codes/load_workload.hpp` | เลือก Resource เดียวหรือวน Resource แบบ Round Robin |
+| `scripts/run_server.sh` | เริ่ม Server ด้วยค่าที่กำหนดใน Script |
+| `scripts/demo_clients.sh` | เปิด 5 Client Processes เพื่อส่งคำสั่งต่างกันจาก Terminal เดียว |
 | `scripts/project_experiments.sh` | รัน Experiments 1–3 และเก็บรายงานกับหลักฐาน |
-| `scripts/experiment_helpers.sh` | ตรวจสถานะและ Cleanup เฉพาะ Server ที่ Harness เปิดเอง |
-| `scripts/load_test.sh` | เพิ่มจำนวน Client สำหรับ Load Test |
-| `tests/client_load_metrics_test.cpp` | ทดสอบการคำนวณ Load Metrics |
-| `tests/client_load_workload_test.cpp` | ทดสอบการเลือก Resource ของ Workload |
-| `tests/experiment_harness_test.sh` | ทดสอบกติกา Cleanup ของ Experiment Harness |
-| `Makefile` | Build และ Clean Binary |
+| `scripts/experiment_helpers.sh` | ตรวจสถานะและ Cleanup เฉพาะ Server ที่ Experiment Script เปิดเอง |
+| `scripts/load_test.sh` | เพิ่มจำนวน Client และบันทึกผล Load Test |
+| `tests/client_load_metrics_test.cpp` | ตรวจการคำนวณ Load Metrics |
+| `tests/client_load_workload_test.cpp` | ตรวจการเลือก Resource ของ Workload |
+| `tests/experiment_harness_test.sh` | ตรวจการ Cleanup ของ Experiment Harness |
+| `Makefile` | Build และ Clean โปรแกรม |
 | `Dockerfile` | สร้าง Linux Build Environment |
 | `docker-compose.yml` | สร้างและเปิด Container |
