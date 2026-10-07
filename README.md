@@ -45,13 +45,6 @@ docker compose exec cpp make test
 - bin/client
 - bin/client_load
 
-ถ้าต้องการ Build ใหม่ทั้งหมด:
-
-~~~powershell
-docker compose exec cpp make clean
-docker compose exec cpp make
-~~~
-
 ### 4. เปิด Server
 
 เปิด Server ใน Terminal แรกจาก PowerShell ที่โฟลเดอร์โปรเจกต์:
@@ -122,20 +115,12 @@ Client ── Request ──> /osproj_requests ──> Worker ── Response �
 3. Worker ส่ง Response กลับไปยัง Queue ของ Client
 4. Resource Mutex ป้องกันการจอง Resource เดียวกันพร้อมกัน
 
-Request ประกอบด้วย `command`, `client_id`, `resource_id` และชื่อ Response Queue
-ส่วน Response ประกอบด้วยสถานะสำเร็จ, เจ้าของ Resource และข้อความผลลัพธ์
-
-คำสั่งที่รองรับคือ `LIST`, `STATUS`, `RESERVE`, `CANCEL` และ `QUIT`
-โดย Resource ID อยู่ระหว่าง 1–20
-
-รายละเอียดการออกแบบระบบอยู่ที่ [docs/architecture.md](docs/architecture.md)
+รายละเอียดสถาปัตยกรรมและฟิลด์ Request/Response อยู่ที่ [docs/architecture.md](docs/architecture.md)
 
 ## Demo: 5 Clients ส่งคำสั่งต่างกัน
 
 ใช้ Server จาก Quick Start โดยให้เปิดด้วย `--sync on` และ `--verbose on`
 ถ้า Resource 1 หรือ 2 ถูกจองไปแล้ว ให้หยุด Server แล้วเริ่มใหม่ก่อน Demo
-
-### Demo แบบ Terminal เดียวสำหรับ Client ทั้ง 5 ตัว
 
 เมื่อเปิด Server ใหม่ตาม Quick Start แล้ว เปิด PowerShell อีกหน้าต่าง:
 
@@ -158,32 +143,6 @@ docker compose exec cpp bash scripts/demo_clients.sh
 หลัง Demo แล้ว Resource 1 ถูกจองโดย Client-3; เริ่ม Server ใหม่ก่อน Demo รอบถัดไป
 ผล `LIST`/`STATUS` อาจต่างกันตามลำดับที่ Server ประมวลผล
 
-ถ้าเขียน `logs/` ไม่ได้ ให้เปลี่ยนที่เก็บเป็น `/tmp`:
-
-~~~powershell
-docker compose exec cpp bash -lc "DEMO_LOG_ROOT=/tmp bash scripts/demo_clients.sh"
-~~~
-
-วิธีนี้สาธิตหลาย Client จาก Terminal เดียว ส่วนการนำเสนอตามข้อกำหนดหลาย Terminal
-ให้ใช้ขั้นตอนด้านล่าง
-
-### Demo แบบ 6 Terminals สำหรับนำเสนอ
-
-แต่ละ Client Terminal เข้า Container ด้วย `docker compose exec cpp bash` แล้วเปิดดังนี้:
-
-| Terminal | โปรแกรม | คำสั่งที่จะส่งพร้อมกัน |
-|---|---|---|
-| 1 | Server ตามคำสั่งด้านบน | ดู Log |
-| 2 | `./bin/client --id 1` | `LIST` |
-| 3 | `./bin/client --id 2` | `STATUS 1` |
-| 4 | `./bin/client --id 3` | `RESERVE 1` |
-| 5 | `./bin/client --id 4` | `CANCEL 2` |
-| 6 | `./bin/client --id 5` | `QUIT` |
-
-ก่อนเริ่ม ให้ Client-4 ส่ง `RESERVE 2` และรอ `SUCCESS`
-จากนั้นเตรียมคำสั่งตามตารางและกด Enter ใน Client ทั้งห้าใกล้ ๆ กัน
-`QUIT` ปิดเฉพาะ Client-5; Server ยังทำงานต่อ
-
 ### อ่าน Server Log
 
 เปิด `--verbose on` เพื่อดูรายละเอียด Request:
@@ -197,100 +156,6 @@ docker compose exec cpp bash -lc "DEMO_LOG_ROOT=/tmp bash scripts/demo_clients.s
 
 Log อาจพิมพ์ไม่เรียงตาม `seq` เพราะพิมพ์หลังปล่อย Mutex
 ให้ใช้ `seq` เปรียบเทียบลำดับเหตุการณ์
-
-## Load Test
-
-### รายงานผลแบบอ่านง่าย (`report.txt`)
-
-| การทดสอบ | ไฟล์หลักฐาน | เนื้อหา |
-|---|---|---|
-| Experiments 1–3 | `docs/experiment-evidence/<run-id>/...` | รายงานแต่ละ attempt, Server Log, Client output และสรุปผล |
-| Load Test | `results/load-test-*/clients-<N>/` | `report.txt` และ Client output ใน `client.txt` แยกตามจำนวน Client |
-
-Load report แยก Success, Rejected, Timeout, Transport Error, Setup Error และ Skipped
-พร้อม throughput กับ average/P95/maximum latency; Setup Error และ Skipped ไม่ใช่การจองที่ถูกปฏิเสธ
-Timeout หมายถึงไม่ทราบผลฝั่ง Server ไม่ได้ยืนยันว่าการจองล้มเหลว
-
-### ขั้นตอนรัน Load Test แบบไม่กำหนดจำนวนสูงสุด
-
-`load_test.sh` ไม่เปิดหรือหยุด Server ให้ ทำตามขั้นตอนนี้ตามลำดับ
-คำสั่ง `docker compose exec cpp bash` จะเปิด Shell ใน Container และแสดง prompt
-`root@<container>:/workspace#`:
-
-~~~powershell
-docker compose exec cpp bash
-~~~
-
-รันคำสั่งตรวจสอบจาก prompt `root@...:/workspace#`:
-
-~~~bash
-ps -C server -o pid,ppid,args || echo 'No server process visible'
-ls -l /dev/mqueue/osproj_requests 2>/dev/null || echo 'Request Queue is absent'
-~~~
-
-อ่านผลก่อนเริ่ม:
-
-- ถ้า `ps` แสดง Server ของคุณ ให้กด `Ctrl+C` ใน Terminal ที่เปิดมันไว้
-- ถ้า Queue ยังอยู่ ให้ตรวจ Terminal/Container อื่น; อย่าลบ Queue หรือเดา PID
-- เริ่ม Load Test เมื่อไม่พบทั้ง Server และ Queue เดิม
-
-1. **Terminal 1 — PowerShell:** เข้า Container แล้วเปิด Server ค้างไว้
-
-~~~powershell
-docker compose exec cpp bash
-~~~
-
-จากนั้นรันใน Bash ภายใน Container:
-
-~~~bash
-./bin/server --workers 3 --sync on --delay off --verbose off
-~~~
-
-2. **Terminal 2 — PowerShell:** เข้า Container แล้วเพิ่มจำนวน Client ทีละ 5 จน Client คืน Exit Code ที่ไม่ใช่ 0
-
-~~~powershell
-docker compose exec cpp bash
-~~~
-
-จากนั้นรันใน Bash ภายใน Container:
-
-~~~bash
-MAX_CLIENTS=0 STEP=5 REQUESTS_PER_CLIENT=20 bash scripts/load_test.sh
-~~~
-
-เริ่มจาก 5 Clients แล้วเพิ่มเป็น 10, 15, 20, ... โดยไม่กำหนดเพดาน
-Script จะหยุดเมื่อ `client_load` คืน Exit Code ที่ไม่ใช่ 0 เช่น Timeout, Transport Error หรือ Setup Error
-ดูสาเหตุใน `client.txt` และสถิติใน `report.txt` ของรอบนั้น:
-`results/load-test-*/clients-<N>/`
-เมื่อจบ กด `Ctrl+C` ใน Terminal 1 แล้วรอข้อความยืนยันว่า Server หยุดและ Queue ถูกนำออก
-
-อย่ารันคำสั่ง Load Test ต่อท้าย `project_experiments.sh` โดยไม่เปิด Server ใหม่ก่อน:
-Experiment Script เปิดและหยุด Server ของแต่ละรอบเอง
-
-ถ้าจะสั่ง Load Client เอง (Server ต้องยังเปิดอยู่):
-
-~~~powershell
-docker compose exec cpp mkdir -p results
-docker compose exec cpp ./bin/client_load --clients 5 --requests 1 --command RESERVE --resource 10 --experiment manual_reservation --report results/report.txt
-~~~
-
-คำสั่งนี้เขียนทับ `results/report.txt` ถ้ามีอยู่แล้ว เปลี่ยนชื่อไฟล์หากต้องเก็บผลเดิม
-เปลี่ยนโฟลเดอร์ผลลัพธ์ของ Script ด้วย `EVIDENCE_ROOT` หรือ `RESULTS_ROOT`
-
-ตัวอย่างส่ง `STATUS` 20 ครั้งจาก 50 Logical Clients:
-
-~~~powershell
-docker compose exec cpp ./bin/client_load --clients 50 --requests 20 --command STATUS --resource 10
-~~~
-
-ตัวเลือกหลัก: `--clients` จำนวน Client, `--requests` จำนวน Request ต่อ Client,
-`--command` ใช้ `STATUS` หรือ `RESERVE`, `--resource` เลือก Resource 1–20
-และ `--workload` ใช้ Resource เดียว (`same`) หรือวน Resource 1–20 (`round-robin`)
-
-`MAX_CLIENTS=0` (ค่าเริ่มต้น) ไม่กำหนดเพดาน Client; Script เพิ่มจำนวนต่อไปจน `client_load`
-คืน Exit Code ที่ไม่ใช่ 0 เช่น Timeout, Transport Error หรือ Setup Error; Server ต้องเปิดค้างไว้
-ตลอดการทดสอบ
-Latency นับทุก Request ที่เริ่มส่ง รวม Request ที่ล้มเหลว; Setup Error/Skipped ไม่มี latency
 
 ## Experiments
 
@@ -347,10 +212,51 @@ docker compose exec cpp ./bin/client_load --clients 20 --requests 1 --command RE
 
 คาดหวัง `success=1`, `rejected=19`, ไม่มี Timeout; exit code `3` ปกติเมื่อมีการปฏิเสธ
 
+### Experiment 4: Load หรือ Capacity Test
+
+ใช้ Worker 3 ตัว เปิด `sync` ปิด `delay` และปิด `verbose` จากนั้นเพิ่มจำนวน Client เพื่อหาจุดที่ระบบเริ่มเกิดข้อผิดพลาด
+การทดลองนี้ใช้คำสั่ง `STATUS 10` เพื่อวัดการรองรับคำขอและเวลาตอบสนอง
+
+**Terminal 1 — เปิด Server:**
+
+~~~powershell
+docker compose exec cpp ./bin/server --workers 3 --sync on --delay off --verbose off
+~~~
+
+เปิดหน้าต่างนี้ค้างไว้ระหว่างทดสอบ การใช้ `--verbose off` ช่วยลดภาระจากการพิมพ์ Log รายคำขอ
+
+**Terminal 2 — รัน Load Test:**
+
+~~~powershell
+docker compose exec cpp bash scripts/load_test.sh
+~~~
+
+สคริปต์เริ่มจาก **5 Clients** แล้วเพิ่มเป็น **10, 15, 20, ...** โดยแต่ละ Client ส่ง `STATUS 10` จำนวน **20 ครั้ง**
+เช่น รอบที่มี 5 Clients จะมีคำขอที่วางแผนไว้ 100 ครั้ง และรอบที่มี 10 Clients จะมี 200 ครั้ง
+สคริปต์เพิ่มจำนวนต่อไปจน `client_load` คืน exit code ที่ไม่ใช่ 0 เช่น พบ Timeout, Transport Error หรือ Setup Error
+ตอนหยุดจะแสดง `Load test stopped at ... clients` พร้อมผลของรอบนั้น
+
+ถ้าต้องการทดสอบไม่เกิน **50 Clients** ให้ใช้คำสั่งนี้แทน:
+
+~~~powershell
+docker compose exec -e MAX_CLIENTS=50 cpp bash scripts/load_test.sh
+~~~
+
+ผลแต่ละรอบจะแสดงบน Terminal 2 ทั้งจำนวนคำขอ, Success, Errors, Throughput และ Average/P95/Maximum Latency
+ไฟล์ผลลัพธ์อยู่ที่ `results/load-test-*/clients-<N>/` โดยสคริปต์จะแสดงชื่อโฟลเดอร์ของรอบที่รัน:
+
+- `report.txt`: รายงานอ่านง่าย พร้อมผลราย Client และสถิติรวม
+- `client.txt`: ข้อความจากโปรแกรม รวมรายละเอียดข้อผิดพลาด
+
+เปรียบเทียบรอบที่สำเร็จครบล่าสุดกับรอบแรกที่เริ่มเกิดข้อผิดพลาด เพื่อดูจำนวน Client ที่รองรับได้ในการทดลองครั้งนั้น
+Setup Error นับ Client ที่เตรียมไม่สำเร็จ ส่วน Skipped นับคำขอที่ยังไม่ได้เริ่มส่ง
+Latency รวมทุกคำขอที่เริ่มส่ง ทั้งสำเร็จและล้มเหลว; Setup Error และ Skipped ไม่มีตัวอย่าง Latency
+
+เมื่อทดสอบเสร็จ ให้กด **Ctrl+C ใน Terminal 1** เพื่อจบการทำงานของ Server
+
 ### เก็บหลักฐาน Experiment 1–3 อัตโนมัติ
 
-ปิด Server แบบ manual ก่อน แล้วใช้คำสั่งตรวจ Server/Queue ในหัวข้อ Load Test
-เริ่ม Script ต่อเมื่อไม่พบทั้งสองอย่าง จาก PowerShell:
+รันสคริปต์นี้เพื่อเก็บหลักฐาน Experiment 1–3 อัตโนมัติ:
 
 ~~~powershell
 docker compose exec cpp bash scripts/project_experiments.sh
@@ -363,13 +269,6 @@ Script จะเปิดและหยุด Server ของแต่ละ�
 - Experiment 2 ลองได้สูงสุด 5 ครั้ง; เปลี่ยนจำนวน Client/ครั้งได้ด้วย `RACE_CLIENTS` และ `RACE_RETRIES`
 - ถ้ามี Server/Queue เดิม Script จะหยุดโดยไม่แตะต้องของเดิม
 - ถ้าจบด้วย Error ให้ตรวจหลักฐานที่สร้างไว้; อย่าแก้ผลหรือใช้ `RUN_ID` ซ้ำ
-
-### Experiment 4: Load หรือ Capacity Test
-
-ทำตามขั้นตอน **Load Test แบบไม่กำหนดจำนวนสูงสุด** ในหัวข้อ Load Test ด้านบน โดยเปิด Server
-ใหม่หลังจบ Experiment Script และใช้ Terminal แยกสำหรับ Server กับ Load Test
-
-ให้สังเกตจำนวน Client ที่เริ่มเกิดปัญหา พร้อม Throughput, Average Latency และ Timeout
 
 ## สรุปการตั้งค่าแต่ละ Experiment
 
@@ -415,19 +314,34 @@ Script จะเปิดและหยุด Server ของแต่ละ�
 
 ## Cleanup
 
-หยุด Server ด้วย Ctrl+C แล้วออกจาก Container:
-
-~~~bash
-exit
-~~~
-
-จากนั้นทำคำสั่งบน PowerShell:
+กด **Ctrl+C** ในหน้าต่าง Server แล้วรันคำสั่งนี้จาก PowerShell:
 
 ~~~powershell
 docker compose down
 ~~~
 
-ถ้า Container ค้าง ให้ใช้:
+## การแก้ปัญหา
+
+### ต้องการ Build ใหม่ทั้งหมด
+
+ลบโปรแกรมที่ Build ไว้แล้วคอมไพล์ใหม่:
+
+~~~powershell
+docker compose exec cpp make clean
+docker compose exec cpp make
+~~~
+
+### Demo เขียนโฟลเดอร์ logs ไม่ได้
+
+เปลี่ยนที่เก็บ Log เป็น `/tmp` ภายใน Container:
+
+~~~powershell
+docker compose exec -e DEMO_LOG_ROOT=/tmp cpp bash scripts/demo_clients.sh
+~~~
+
+### เก็บกวาด Container ที่เหลือจากบริการเดิม
+
+หากมี Container ของบริการที่ไม่มีอยู่ใน Compose ของโปรเจกต์แล้ว ให้ใช้:
 
 ~~~powershell
 docker compose down --remove-orphans
