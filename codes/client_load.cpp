@@ -117,11 +117,24 @@ void run_logical_client(int client_number, const LoadOptions& options,
     }
 }
 
-// คำนวณและพิมพ์ Metrics ของ Load Test
+// พิมพ์ผลแบบสั้นสำหรับการทดลองทั่วไป และ Metrics แบบเต็มสำหรับ Load Test
 void print_stats(const LoadOptions& options, const ClientStats& stats,
                  long long elapsed_us) {
     const long long planned =
         static_cast<long long>(options.clients) * options.requests_per_client;
+    if (options.experiment != "load_test") {
+        std::cout << "Clients: " << options.clients << '\n'
+                  << "Requests per client: " << options.requests_per_client << '\n'
+                  << "planned_requests=" << planned << '\n'
+                  << "attempted_requests=" << stats.attempted() << "\n\n"
+                  << "success=" << stats.succeeded << '\n'
+                  << "rejected=" << stats.rejected << '\n'
+                  << "timeouts=" << stats.timeouts << '\n'
+                  << "transport_errors=" << stats.transport_errors << '\n'
+                  << "setup_errors=" << stats.setup_errors << '\n';
+        return;
+    }
+
     const long long attempted = stats.attempted();
     const long long skipped = planned - attempted;
     double throughput = 0.0;
