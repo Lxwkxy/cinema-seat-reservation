@@ -182,11 +182,14 @@ run_trial() {
       success="$(metric_value "$client_output" success)"
       rejected="$(metric_value "$client_output" rejected)"
       timeouts="$(metric_value "$client_output" timeouts)"
-      transport_errors="$(metric_value "$client_output" transport_errors)"
+      # The compact console summary omits transport_errors; the report retains it.
+      transport_errors="$(awk -F': *' '$1 == "Transport errors" { print $2; exit }' "$report" 2>/dev/null)"
       setup_errors="$(metric_value "$client_output" setup_errors)"
 
       if [ "$client_status" -ne 0 ] && [ "$client_status" -ne 3 ]; then
         failure_reason="client_exit_$client_status"
+      elif ! [[ "$transport_errors" =~ ^[0-9]+$ ]]; then
+        failure_reason="transport_error_metric_missing_or_invalid"
       elif [ "$attempted" -ne "$planned" ] ||
            [ "$timeouts" -ne 0 ] || [ "$transport_errors" -ne 0 ] ||
            [ "$setup_errors" -ne 0 ]; then
