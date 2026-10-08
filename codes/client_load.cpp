@@ -130,7 +130,6 @@ void print_stats(const LoadOptions& options, const ClientStats& stats,
                   << "success=" << stats.succeeded << '\n'
                   << "rejected=" << stats.rejected << '\n'
                   << "timeouts=" << stats.timeouts << '\n'
-                  << "transport_errors=" << stats.transport_errors << '\n'
                   << "setup_errors=" << stats.setup_errors << '\n';
         return;
     }
